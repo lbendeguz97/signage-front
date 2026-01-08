@@ -18,7 +18,7 @@ fun AdScreen(modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxSize().padding(16.dp)) {
         // We can add logic here to switch between video and html ads.
         // For now, we will just display a sample HTML ad from a URL.
-        HtmlContent(url = "https://vanenet.hu")
+        HtmlContent(url = "https://www.vanenet.hu")
     }
 }
 
