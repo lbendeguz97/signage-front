@@ -1,8 +1,5 @@
 package com.example.signage_front.ui.screens
 
-import android.view.ViewGroup
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -10,35 +7,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.signage_front.ui.theme.SignagefrontTheme
+import dev.datlag.web.WebView
+import dev.datlag.web.rememberWebViewState
 
 @Composable
 fun AdScreen(modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxSize().padding(16.dp)) {
         // We can add logic here to switch between video and html ads.
         // For now, we will just display a sample HTML ad from a URL.
-        HtmlContent(url = "https://www.vanenet.hu")
+        HtmlContent(url = "https://www.wikipedia.org/")
     }
 }
 
 @Composable
 fun HtmlContent(url: String, modifier: Modifier = Modifier) {
-    AndroidView(
+    val webViewState = rememberWebViewState(url = url)
+    WebView(
+        state = webViewState,
         modifier = modifier.fillMaxSize(),
-        factory = {
-            WebView(it).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                webViewClient = WebViewClient()
-                settings.javaScriptEnabled = true
-                loadUrl(url)
-            }
-        },
-        update = {
-            it.loadUrl(url)
+        onCreated = {
+            it.settings.javaScriptEnabled = true
+            it.settings.domStorageEnabled = true
         }
     )
 }
