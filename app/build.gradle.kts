@@ -6,9 +6,7 @@ plugins {
 
 android {
     namespace = "com.example.signage_front"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.signage_front"
@@ -52,6 +50,12 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.compose.webview.multiplatform)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)
+    implementation(libs.bouncycastle.pkix)
+    implementation(libs.bouncycastle.prov)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
