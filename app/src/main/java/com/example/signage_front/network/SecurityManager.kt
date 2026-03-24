@@ -40,8 +40,17 @@ object SecurityManager {
             KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
         )
             .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256)
-            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+            .setDigests(
+                KeyProperties.DIGEST_SHA1,
+                KeyProperties.DIGEST_SHA256,
+                KeyProperties.DIGEST_SHA384,
+                KeyProperties.DIGEST_SHA512,
+                KeyProperties.DIGEST_NONE
+            )
+            .setSignaturePaddings(
+                KeyProperties.SIGNATURE_PADDING_RSA_PKCS1,
+                KeyProperties.SIGNATURE_PADDING_RSA_PSS
+            )
             .build()
         kpg.initialize(spec)
         kpg.generateKeyPair()
@@ -62,17 +71,33 @@ object SecurityManager {
                 "\n-----END CERTIFICATE REQUEST-----"
     }
 
-    fun saveCertificate(pemCertificate: String) {
+    /**
+     * Saves the leaf certificate and appends the Root CA to build a full chain.
+     * Uses setKeyEntry to update the certificate chain for the existing key.
+     */
+    fun saveCertificate(leafPem: String, rootCaPem: String? = null) {
         val cf = CertificateFactory.getInstance("X.509")
-        val certBytes = pemCertificate
-            .replace("-----BEGIN CERTIFICATE-----", "")
-            .replace("-----END CERTIFICATE-----", "")
-            .replace("\n", "")
-            .let { Base64.decode(it, Base64.DEFAULT) }
         
-        val cert = cf.generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
+        // Parse Leaf Certificate(s)
+        val certList = cf.generateCertificates(ByteArrayInputStream(leafPem.toByteArray()))
+            .map { it as X509Certificate }
+            .toMutableList()
+            
+        // Append Root CA to complete the chain
+        rootCaPem?.let {
+            val rootCert = cf.generateCertificate(ByteArrayInputStream(it.toByteArray())) as X509Certificate
+            if (!certList.contains(rootCert)) {
+                certList.add(rootCert)
+            }
+        }
         
+        if (certList.isEmpty()) throw Exception("No certificates found in response")
+
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        keyStore.setKeyEntry(KEY_ALIAS, getPrivateKey(), null, arrayOf(cert))
+        val privateKey = keyStore.getKey(KEY_ALIAS, null) as PrivateKey
+        
+        // Using setKeyEntry to update only the certificate chain.
+        // This avoids orphaning the key on older Android versions.
+        keyStore.setKeyEntry(KEY_ALIAS, privateKey, null, certList.toTypedArray())
     }
 }
