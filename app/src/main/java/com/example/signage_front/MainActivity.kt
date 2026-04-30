@@ -5,19 +5,15 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -48,53 +44,69 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val navController = rememberNavController()
-            var isLoading by remember { mutableStateOf(true) }
+            var isEnrolled by remember { mutableStateOf(SecurityManager.hasValidKey()) }
+            var isCheckingIn by remember { mutableStateOf(false) }
             var enrollmentError by remember { mutableStateOf<String?>(null) }
             val scope = rememberCoroutineScope()
+
+            LaunchedEffect(Unit) {
+                Log.d(TAG, "App started. checking enrollment status: $isEnrolled")
+                if (isEnrolled) {
+                    checkIn(
+                        onSuccess = { 
+                            Log.d(TAG, "Background check-in successful")
+                            AdScheduler.startPolling(applicationContext)
+                        },
+                        onFailure = { 
+                            Log.w(TAG, "Background check-in failed, navigating to enrollment")
+                            navController.navigate("enrollment")
+                        }
+                    )
+                } else {
+                    Log.d(TAG, "Not enrolled, navigating to enrollment screen")
+                    navController.navigate("enrollment") {
+                        popUpTo("home") { inclusive = false }
+                    }
+                }
+            }
 
             SignagefrontTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     NavHost(
                         navController = navController,
-                        startDestination = "splash",
+                        startDestination = "home",
                         modifier = Modifier.padding(innerPadding)
                     ) {
-                        composable("splash") {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator()
-                            }
-                            LaunchedEffect(Unit) {
-                                checkIn(
-                                    onSuccess = { navController.navigate("home") { popUpTo("splash") { inclusive = true } } },
-                                    onFailure = { navController.navigate("enrollment") { popUpTo("splash") { inclusive = true } } }
-                                )
-                                isLoading = false
-                            }
+                        composable("home") {
+                            HomeScreen(onNavigateToAd = { navController.navigate("ad") })
                         }
                         composable("enrollment") {
                             EnrollmentScreen(
-                                isLoading = isLoading,
+                                isLoading = isCheckingIn,
                                 errorMessage = enrollmentError,
                                 onEnroll = { otp ->
                                     scope.launch {
-                                        isLoading = true
+                                        isCheckingIn = true
                                         enrollmentError = null
                                         val success = enroll(otp)
                                         if (success) {
                                             checkIn(
-                                                onSuccess = { navController.navigate("home") { popUpTo("enrollment") { inclusive = true } } },
+                                                onSuccess = { 
+                                                    isEnrolled = true
+                                                    AdScheduler.startPolling(applicationContext)
+                                                    navController.navigate("home") { 
+                                                        popUpTo("enrollment") { inclusive = true } 
+                                                    } 
+                                                },
                                                 onFailure = { enrollmentError = "Check-in failed after enrollment." }
                                             )
                                         } else {
                                             enrollmentError = "Enrollment failed. Please check your OTP."
                                         }
-                                        isLoading = false
+                                        isCheckingIn = false
                                     }
                                 }
                             )
-                        }
-                        composable("home") {
-                            HomeScreen(onNavigateToAd = { navController.navigate("ad") })
                         }
                         composable("ad") {
                             AdScreen(content = AdContent.Html("https://www.google.com"))
@@ -107,26 +119,25 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun checkIn(onSuccess: () -> Unit, onFailure: () -> Unit) {
         withContext(Dispatchers.IO) {
+            Log.d(TAG, "Executing check-in...")
             if (!SecurityManager.hasValidKey()) {
+                Log.w(TAG, "Check-in aborted: No valid key found")
                 withContext(Dispatchers.Main) { onFailure() }
                 return@withContext
             }
 
             try {
-                // Pass application context to get the raw resource
                 val client = NetworkClientProvider.getMTlsClient(applicationContext)
                 val request = Request.Builder()
                     .url("${Config.BASE_URL}/checkin")
                     .get()
                     .build()
 
+                Log.d(TAG, "Sending GET to ${request.url}")
                 client.newCall(request).execute().use { response ->
+                    Log.d(TAG, "Response code: ${response.code}")
                     when (response.code) {
-                        204 -> {
-                            // Start polling on successful check-in
-                            AdScheduler.startPolling(applicationContext)
-                            withContext(Dispatchers.Main) { onSuccess() }
-                        }
+                        204 -> withContext(Dispatchers.Main) { onSuccess() }
                         401, 403 -> {
                             Log.w(TAG, "Check-in unauthorized: ${response.code}")
                             withContext(Dispatchers.Main) { onFailure() }
@@ -146,9 +157,11 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun enroll(otp: String): Boolean {
         return withContext(Dispatchers.IO) {
+            Log.d(TAG, "Starting enrollment with OTP: $otp")
             try {
                 SecurityManager.generateKeyPair()
                 val csr = SecurityManager.createCsr()
+                Log.d(TAG, "CSR generated successfully")
 
                 val client = NetworkClientProvider.getStandardClient()
                 val json = JSONObject().apply {
@@ -162,16 +175,13 @@ class MainActivity : ComponentActivity() {
                     .post(body)
                     .build()
 
+                Log.d(TAG, "Sending POST to ${request.url}")
                 client.newCall(request).execute().use { response ->
+                    Log.d(TAG, "Enrollment response code: ${response.code}")
                     if (response.isSuccessful) {
-                        val responseBody = response.body?.string() ?: return@withContext false
-                        val jsonResponse = JSONObject(responseBody)
-                        val certPem = jsonResponse.getString("certificate")
-                        
-                        // Load Root CA from resources to append to the chain
-                        val rootCa = resources.openRawResource(R.raw.ca_cert).bufferedReader().use { it.readText() }
-                        
-                        SecurityManager.saveCertificate(certPem, rootCa)
+                        val certPem = response.body?.string() ?: return@withContext false
+                        SecurityManager.saveCertificate(certPem)
+                        Log.d(TAG, "Certificate saved successfully")
                         true
                     } else {
                         Log.e(TAG, "Enrollment failed: ${response.code} - ${response.message}")
