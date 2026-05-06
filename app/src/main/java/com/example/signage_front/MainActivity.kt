@@ -1,7 +1,17 @@
 package com.example.signage_front
 
+import android.app.AlarmManager
+import android.app.KeyguardManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -22,6 +32,7 @@ import com.example.signage_front.network.AdScheduler
 import com.example.signage_front.network.Config
 import com.example.signage_front.network.NetworkClientProvider
 import com.example.signage_front.network.SecurityManager
+import com.example.signage_front.receiver.WakeReceiver
 import com.example.signage_front.ui.screens.AdContent
 import com.example.signage_front.ui.screens.AdScreen
 import com.example.signage_front.ui.screens.EnrollmentScreen
@@ -38,9 +49,23 @@ import org.json.JSONObject
 class MainActivity : ComponentActivity() {
     private val TAG = "SignageAuth"
 
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                Log.d(TAG, "Screen off detected. Scheduling wake-up in 1 minute.")
+                scheduleWakeUp(context)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Apply kiosk flags immediately
+        configureKioskWindow()
+
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         setContent {
             val navController = rememberNavController()
@@ -50,7 +75,6 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
 
             LaunchedEffect(Unit) {
-                Log.d(TAG, "App started. checking enrollment status: $isEnrolled")
                 if (isEnrolled) {
                     checkIn(
                         onSuccess = { 
@@ -63,7 +87,6 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 } else {
-                    Log.d(TAG, "Not enrolled, navigating to enrollment screen")
                     navController.navigate("enrollment") {
                         popUpTo("home") { inclusive = false }
                     }
@@ -117,39 +140,70 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Log.d(TAG, "onNewIntent received - Re-applying kiosk flags")
+        configureKioskWindow()
+    }
+
+    private fun configureKioskWindow() {
+        // Force the screen to turn on and stay on, bypassing the keyguard
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            keyguardManager.requestDismissKeyguard(this, null)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun scheduleWakeUp(context: Context) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, WakeReceiver::class.java)
+        
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+
+        val pendingIntent = PendingIntent.getBroadcast(context, 0, intent, flags)
+        val triggerAt = SystemClock.elapsedRealtime() + 60_000
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+        } else {
+            alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try { unregisterReceiver(screenOffReceiver) } catch (e: Exception) {}
+    }
+
     private suspend fun checkIn(onSuccess: () -> Unit, onFailure: () -> Unit) {
         withContext(Dispatchers.IO) {
-            Log.d(TAG, "Executing check-in...")
             if (!SecurityManager.hasValidKey()) {
-                Log.w(TAG, "Check-in aborted: No valid key found")
                 withContext(Dispatchers.Main) { onFailure() }
                 return@withContext
             }
-
             try {
                 val client = NetworkClientProvider.getMTlsClient(applicationContext)
-                val request = Request.Builder()
-                    .url("${Config.BASE_URL}/checkin")
-                    .get()
-                    .build()
-
-                Log.d(TAG, "Sending GET to ${request.url}")
+                val request = Request.Builder().url("${Config.BASE_URL}/checkin").get().build()
                 client.newCall(request).execute().use { response ->
-                    Log.d(TAG, "Response code: ${response.code}")
-                    when (response.code) {
-                        204 -> withContext(Dispatchers.Main) { onSuccess() }
-                        401, 403 -> {
-                            Log.w(TAG, "Check-in unauthorized: ${response.code}")
-                            withContext(Dispatchers.Main) { onFailure() }
-                        }
-                        else -> {
-                            Log.e(TAG, "Check-in failed with code: ${response.code}")
-                            withContext(Dispatchers.Main) { onFailure() }
-                        }
-                    }
+                    if (response.code == 204) withContext(Dispatchers.Main) { onSuccess() }
+                    else withContext(Dispatchers.Main) { onFailure() }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "mTLS Handshake or Network error during check-in", e)
                 withContext(Dispatchers.Main) { onFailure() }
             }
         }
@@ -157,41 +211,21 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun enroll(otp: String): Boolean {
         return withContext(Dispatchers.IO) {
-            Log.d(TAG, "Starting enrollment with OTP: $otp")
             try {
                 SecurityManager.generateKeyPair()
                 val csr = SecurityManager.createCsr()
-                Log.d(TAG, "CSR generated successfully")
-
                 val client = NetworkClientProvider.getStandardClient()
-                val json = JSONObject().apply {
-                    put("otp", otp)
-                    put("csr", csr)
-                }
-                
+                val json = JSONObject().apply { put("otp", otp); put("csr", csr) }
                 val body = json.toString().toRequestBody("application/json".toMediaType())
-                val request = Request.Builder()
-                    .url("${Config.BASE_URL}/enroll")
-                    .post(body)
-                    .build()
-
-                Log.d(TAG, "Sending POST to ${request.url}")
+                val request = Request.Builder().url("${Config.BASE_URL}/enroll").post(body).build()
                 client.newCall(request).execute().use { response ->
-                    Log.d(TAG, "Enrollment response code: ${response.code}")
                     if (response.isSuccessful) {
                         val certPem = response.body?.string() ?: return@withContext false
                         SecurityManager.saveCertificate(certPem)
-                        Log.d(TAG, "Certificate saved successfully")
                         true
-                    } else {
-                        Log.e(TAG, "Enrollment failed: ${response.code} - ${response.message}")
-                        false
-                    }
+                    } else false
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error during enrollment process", e)
-                false
-            }
+            } catch (e: Exception) { false }
         }
     }
 }
