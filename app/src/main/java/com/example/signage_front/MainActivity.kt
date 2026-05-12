@@ -35,6 +35,7 @@ import com.example.signage_front.network.SecurityManager
 import com.example.signage_front.receiver.WakeReceiver
 import com.example.signage_front.ui.screens.AdContent
 import com.example.signage_front.ui.screens.AdScreen
+import com.example.signage_front.ui.screens.DebugScreen
 import com.example.signage_front.ui.screens.EnrollmentScreen
 import com.example.signage_front.ui.screens.HomeScreen
 import com.example.signage_front.ui.theme.SignagefrontTheme
@@ -62,9 +63,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Apply kiosk flags immediately
         configureKioskWindow()
-
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         setContent {
@@ -75,6 +74,17 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
 
             LaunchedEffect(Unit) {
+                if (!checkServerAvailability()) {
+                    if (Config.ENV == "dev") {
+                        navController.navigate("debug") {
+                            popUpTo("home") { inclusive = false }
+                        }
+                    } else {
+                        Log.e(TAG, "Production environment: Server unavailable. Retrying in background...")
+                    }
+                    return@LaunchedEffect
+                }
+
                 if (isEnrolled) {
                     checkIn(
                         onSuccess = { 
@@ -111,6 +121,15 @@ class MainActivity : ComponentActivity() {
                                     scope.launch {
                                         isCheckingIn = true
                                         enrollmentError = null
+                                        if (!checkServerAvailability()) {
+                                            if (Config.ENV == "dev") {
+                                                navController.navigate("debug")
+                                            } else {
+                                                enrollmentError = "Server unavailable. Please check connection."
+                                            }
+                                            isCheckingIn = false
+                                            return@launch
+                                        }
                                         val success = enroll(otp)
                                         if (success) {
                                             checkIn(
@@ -134,20 +153,64 @@ class MainActivity : ComponentActivity() {
                         composable("ad") {
                             AdScreen(content = AdContent.Html("https://www.google.com"))
                         }
+                        composable("debug") {
+                            DebugScreen(onRetry = {
+                                scope.launch {
+                                    if (checkServerAvailability()) {
+                                        if (SecurityManager.hasValidKey()) {
+                                            checkIn(
+                                                onSuccess = { 
+                                                    navController.navigate("home") { popUpTo("debug") { inclusive = true } }
+                                                    AdScheduler.startPolling(applicationContext)
+                                                },
+                                                onFailure = { navController.navigate("enrollment") { popUpTo("debug") { inclusive = true } } }
+                                            )
+                                        } else {
+                                            navController.navigate("enrollment") { popUpTo("debug") { inclusive = true } }
+                                        }
+                                    }
+                                }
+                            })
+                        }
                     }
                 }
             }
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        Log.d(TAG, "onNewIntent received - Re-applying kiosk flags")
-        configureKioskWindow()
+    private suspend fun checkServerAvailability(): Boolean {
+        return withContext(Dispatchers.IO) {
+            // Try Primary URL
+            if (tryEcho(Config.BASE_URL)) {
+                Config.currentBaseUrl = Config.BASE_URL
+                return@withContext true
+            }
+            // Try Backup URL
+            if (tryEcho(Config.BASE_URL_BACKUP)) {
+                Config.currentBaseUrl = Config.BASE_URL_BACKUP
+                return@withContext true
+            }
+            false
+        }
+    }
+
+    private suspend fun tryEcho(url: String): Boolean {
+        return try {
+            val client = NetworkClientProvider.getStandardClient()
+            val request = Request.Builder()
+                .url("$url/echo")
+                .get()
+                .build()
+            client.newCall(request).execute().use { response ->
+                response.code == 204
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Echo failed for $url: ${e.message}")
+            false
+        }
     }
 
     private fun configureKioskWindow() {
-        // Force the screen to turn on and stay on, bypassing the keyguard
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -198,7 +261,7 @@ class MainActivity : ComponentActivity() {
             }
             try {
                 val client = NetworkClientProvider.getMTlsClient(applicationContext)
-                val request = Request.Builder().url("${Config.BASE_URL}/checkin").get().build()
+                val request = Request.Builder().url("${Config.currentBaseUrl}/checkin").get().build()
                 client.newCall(request).execute().use { response ->
                     if (response.code == 204) withContext(Dispatchers.Main) { onSuccess() }
                     else withContext(Dispatchers.Main) { onFailure() }
@@ -217,7 +280,7 @@ class MainActivity : ComponentActivity() {
                 val client = NetworkClientProvider.getStandardClient()
                 val json = JSONObject().apply { put("otp", otp); put("csr", csr) }
                 val body = json.toString().toRequestBody("application/json".toMediaType())
-                val request = Request.Builder().url("${Config.BASE_URL}/enroll").post(body).build()
+                val request = Request.Builder().url("${Config.currentBaseUrl}/enroll").post(body).build()
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
                         val certPem = response.body?.string() ?: return@withContext false
