@@ -9,6 +9,7 @@ data class AdStatus(
     val adAllowed: Boolean,
     val adult: Boolean,
     val path: String,
+    val url: String? = null,
     val display: String,
     val displayTime: Int?,
     val mediaType: String? = null,

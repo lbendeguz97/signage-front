@@ -65,7 +65,7 @@ object AdScheduler {
 
         val client = NetworkClientProvider.getMTlsClient(context)
         val request = Request.Builder()
-            .url("${Config.BASE_URL}/getAdStatus")
+            .url("${Config.currentBaseUrl}/getAdStatus")
             .get()
             .build()
 
@@ -107,26 +107,21 @@ object AdScheduler {
                         adAllowed = obj.getBoolean("ad_allowed"),
                         adult = obj.getBoolean("adult"),
                         path = obj.getString("path"),
+                        url = if (obj.isNull("url")) null else obj.getString("url"),
                         display = obj.getString("display"),
                         displayTime = if (obj.isNull("display_time")) null else obj.getInt("display_time"),
-                        mediaType = mediaType
+                        mediaType = mediaType,
+                        expectedChecksum = if (obj.isNull("checksum")) null else obj.getString("checksum"),
+                        expectedSize = if (obj.isNull("size")) 0L else obj.getLong("size")
                     )
                 )
             }
 
-            // 1. Sync database
+            // The Repository now handles DB sync, Media Download, and Integrity Verification
             val repository = AdRepository(context)
             repository.syncAds(adList)
-            
-            // 2. Download missing media files
-            adList.forEach { ad ->
-                MediaManager.downloadMediaIfNeeded(context, ad)
-            }
 
-            // 3. Cleanup orphaned files
-            MediaManager.cleanupOrphanedMedia(context, adList)
-
-            Log.d(TAG, "Sync and Media Download complete. Total ads: ${adList.size}")
+            Log.d(TAG, "Full Sync (DB + Media) complete. Total ads: ${adList.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Error during sync or download process", e)
         }
