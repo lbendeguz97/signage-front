@@ -1,6 +1,7 @@
 package com.example.signage_front.ui.screens
 
 import androidx.annotation.OptIn
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -18,19 +19,30 @@ import com.multiplatform.webview.web.WebView
 import com.multiplatform.webview.web.rememberWebViewState
 
 sealed class AdContent {
-    data class Html(val url: String) : AdContent()
-    data class Video(val url: String) : AdContent()
+    data class Html(val url: String, val redirectUrl: String? = null) : AdContent()
+    data class Video(val videoUrl: String, val redirectUrl: String? = null) : AdContent()
 }
 
 @Composable
 fun AdScreen(
-    content: AdContent = AdContent.Html("https://www.google.com"),
+    content: AdContent,
+    onAdClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .clickable {
+                val redirectUrl = when (content) {
+                    is AdContent.Html -> content.redirectUrl
+                    is AdContent.Video -> content.redirectUrl
+                }
+                redirectUrl?.let { onAdClick(it) }
+            }
+    ) {
         when (content) {
             is AdContent.Html -> HtmlContent(url = content.url)
-            is AdContent.Video -> VideoContent(videoUrl = content.url)
+            is AdContent.Video -> VideoContent(videoUrl = content.videoUrl)
         }
     }
 }

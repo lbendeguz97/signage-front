@@ -57,6 +57,7 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.bouncycastle.pkix)
     implementation(libs.bouncycastle.prov)
+    implementation(libs.zxing.core)
     
     // Room
     implementation(libs.androidx.room.runtime)

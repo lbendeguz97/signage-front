@@ -1,65 +1,94 @@
 package com.example.signage_front.network
 
 import android.content.Context
+import android.util.Log
 import com.example.signage_front.R
-import okhttp3.OkHttpClient
+import okhttp3.*
 import okhttp3.logging.HttpLoggingInterceptor
+import java.io.IOException
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.KeyManagerFactory
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManagerFactory
-import javax.net.ssl.X509TrustManager
+import javax.net.ssl.*
 
 object NetworkClientProvider {
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+    private const val TAG = "OkHttpEvents"
 
-    /**
-     * Creates an OkHttpClient configured for mTLS.
-     * @param context Required to load the Root CA from resources for the TrustManager.
-     */
-    fun getMTlsClient(context: Context): OkHttpClient {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
+    private val eventListenerFactory = object : EventListener.Factory {
+        override fun create(call: Call): EventListener = object : EventListener() {
+            override fun callStart(call: Call) {
+                Log.d(TAG, "🚀 Call Start: ${call.request().url}")
+            }
+            override fun secureConnectStart(call: Call) {
+                Log.d(TAG, "🔒 TLS Handshake Start")
+            }
+            override fun secureConnectEnd(call: Call, handshake: Handshake?) {
+                Log.d(TAG, "✅ TLS Handshake End")
+            }
+            override fun requestHeadersEnd(call: Call, request: Request) {
+                Log.d(TAG, "📤 Request Headers Sent")
+            }
+            override fun responseHeadersStart(call: Call) {
+                Log.d(TAG, "⏳ Waiting for Response Headers...")
+            }
+            override fun responseHeadersEnd(call: Call, response: Response) {
+                Log.d(TAG, "📥 Response Received: ${response.code}")
+            }
+            override fun callFailed(call: Call, ioe: IOException) {
+                Log.e(TAG, "❌ Call Failed: ${ioe.message}")
+            }
         }
+    }
 
-        // 1. Initialize KeyManager with client certificate from AndroidKeyStore
+    private fun getTrustManager(context: Context): X509TrustManager {
+        val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null) }
+        val cf = CertificateFactory.getInstance("X.509")
+        context.resources.openRawResource(R.raw.ca_cert).use { input ->
+            val rootCa = cf.generateCertificate(input) as X509Certificate
+            trustStore.setCertificateEntry("root_ca", rootCa)
+        }
+        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+        tmf.init(trustStore)
+        return tmf.trustManagers[0] as X509TrustManager
+    }
+
+    fun getMTlsClient(context: Context): OkHttpClient {
+        val logging = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
         kmf.init(keyStore, null)
 
-        // 2. Initialize TrustManager with your private Root CA
-        // This ensures the client trusts the server's certificate
-        val trustStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null) }
-        val cf = CertificateFactory.getInstance("X.509")
-        val rootCaInput = context.resources.openRawResource(R.raw.ca_cert)
-        val rootCa = cf.generateCertificate(rootCaInput) as X509Certificate
-        trustStore.setCertificateEntry("root_ca", rootCa)
-
-        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-        tmf.init(trustStore)
-        val trustManager = tmf.trustManagers[0] as X509TrustManager
-
-        // 3. Initialize SSLContext with both KeyManager and TrustManager
-        val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(kmf.keyManagers, tmf.trustManagers, null)
+        val trustManager = getTrustManager(context)
+        val sslContext = SSLContext.getInstance("TLSv1.2")
+        sslContext.init(kmf.keyManagers, arrayOf(trustManager), null)
 
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .hostnameVerifier { _, _ -> true }
             .addInterceptor(logging)
+            .eventListenerFactory(eventListenerFactory)
+            .protocols(listOf(Protocol.HTTP_1_1)) // Force HTTP/1.1 to avoid ALPN hangs
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
     }
 
-    fun getStandardClient(): OkHttpClient {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-        }
+    fun getStandardClient(context: Context): OkHttpClient {
+        val logging = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
+        val trustManager = getTrustManager(context)
+        val sslContext = SSLContext.getInstance("TLSv1.2")
+        sslContext.init(null, arrayOf(trustManager), null)
+
         return OkHttpClient.Builder()
+            .sslSocketFactory(sslContext.socketFactory, trustManager)
+            .hostnameVerifier { _, _ -> true }
             .addInterceptor(logging)
+            .eventListenerFactory(eventListenerFactory)
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
             .build()
     }
 }

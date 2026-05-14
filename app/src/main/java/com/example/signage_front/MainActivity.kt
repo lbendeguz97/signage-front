@@ -15,37 +15,39 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.example.signage_front.data.AdRepository
 import com.example.signage_front.network.AdScheduler
 import com.example.signage_front.network.Config
+import com.example.signage_front.network.MediaManager
 import com.example.signage_front.network.NetworkClientProvider
 import com.example.signage_front.network.SecurityManager
 import com.example.signage_front.receiver.WakeReceiver
-import com.example.signage_front.ui.screens.AdContent
-import com.example.signage_front.ui.screens.AdScreen
-import com.example.signage_front.ui.screens.DebugScreen
-import com.example.signage_front.ui.screens.EnrollmentScreen
-import com.example.signage_front.ui.screens.HomeScreen
+import com.example.signage_front.ui.screens.*
 import com.example.signage_front.ui.theme.SignagefrontTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 class MainActivity : ComponentActivity() {
     private val TAG = "SignageAuth"
@@ -66,12 +68,16 @@ class MainActivity : ComponentActivity() {
         configureKioskWindow()
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
+        val repository = AdRepository(applicationContext)
+
         setContent {
             val navController = rememberNavController()
             var isEnrolled by remember { mutableStateOf(SecurityManager.hasValidKey()) }
             var isCheckingIn by remember { mutableStateOf(false) }
             var enrollmentError by remember { mutableStateOf<String?>(null) }
             val scope = rememberCoroutineScope()
+            
+            val ads by repository.getAllAds().collectAsState(initial = emptyList())
 
             LaunchedEffect(Unit) {
                 if (!checkServerAvailability()) {
@@ -151,7 +157,39 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         composable("ad") {
-                            AdScreen(content = AdContent.Html("https://www.google.com"))
+                            val activeAd = ads.firstOrNull { it.adAllowed && it.syncStatus == "VERIFIED" }
+                            if (activeAd != null) {
+                                val localFile = MediaManager.getLocalFile(applicationContext, activeAd)
+                                val adContent = if (activeAd.mediaType == "video") {
+                                    AdContent.Video(videoUrl = localFile.absolutePath, redirectUrl = activeAd.url)
+                                } else {
+                                    AdContent.Html(url = activeAd.url ?: "", redirectUrl = activeAd.url)
+                                }
+
+                                AdScreen(
+                                    content = adContent,
+                                    onAdClick = { redirectUrl ->
+                                        val fullQrUrl = Config.REDIRECT_ROOT.toHttpUrlOrNull()?.newBuilder()
+                                            ?.addQueryParameter("url", redirectUrl)
+                                            ?.build()
+                                            ?.toString() ?: redirectUrl
+                                        
+                                        val encodedUrl = URLEncoder.encode(fullQrUrl, StandardCharsets.UTF_8.toString())
+                                        navController.navigate("qrcode/$encodedUrl")
+                                    }
+                                )
+                            } else {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text("Waiting for ad content...")
+                                }
+                            }
+                        }
+                        composable(
+                            route = "qrcode/{url}",
+                            arguments = listOf(navArgument("url") { type = NavType.StringType })
+                        ) { backStackEntry ->
+                            val url = backStackEntry.arguments?.getString("url") ?: ""
+                            QrCodeScreen(url = url)
                         }
                         composable("debug") {
                             DebugScreen(onRetry = {
@@ -178,36 +216,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun checkServerAvailability(): Boolean {
-        return withContext(Dispatchers.IO) {
-            // Try Primary URL
-            if (tryEcho(Config.BASE_URL)) {
-                Config.currentBaseUrl = Config.BASE_URL
-                return@withContext true
-            }
-            // Try Backup URL
-            if (tryEcho(Config.BASE_URL_BACKUP)) {
-                Config.currentBaseUrl = Config.BASE_URL_BACKUP
-                return@withContext true
-            }
-            false
-        }
-    }
-
-    private suspend fun tryEcho(url: String): Boolean {
-        return try {
-            val client = NetworkClientProvider.getStandardClient()
-            val request = Request.Builder()
-                .url("$url/echo")
-                .get()
-                .build()
-            client.newCall(request).execute().use { response ->
-                response.code == 204
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Echo failed for $url: ${e.message}")
-            false
-        }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Log.d(TAG, "onNewIntent received - Re-applying kiosk flags")
+        configureKioskWindow()
     }
 
     private fun configureKioskWindow() {
@@ -272,12 +284,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun checkServerAvailability(): Boolean {
+        return withContext(Dispatchers.IO) {
+            if (tryEcho(Config.BASE_URL)) {
+                Config.currentBaseUrl = Config.BASE_URL
+                return@withContext true
+            }
+            if (tryEcho(Config.BASE_URL_BACKUP)) {
+                Config.currentBaseUrl = Config.BASE_URL_BACKUP
+                return@withContext true
+            }
+            false
+        }
+    }
+
+    private suspend fun tryEcho(url: String): Boolean {
+        return try {
+            val client = NetworkClientProvider.getStandardClient(applicationContext)
+            val request = Request.Builder()
+                .url("$url/echo")
+                .get()
+                .build()
+            client.newCall(request).execute().use { response ->
+                response.code == 204
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Echo failed for $url: ${e.message}")
+            false
+        }
+    }
+
     private suspend fun enroll(otp: String): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 SecurityManager.generateKeyPair()
                 val csr = SecurityManager.createCsr()
-                val client = NetworkClientProvider.getStandardClient()
+                val client = NetworkClientProvider.getStandardClient(applicationContext)
                 val json = JSONObject().apply { put("otp", otp); put("csr", csr) }
                 val body = json.toString().toRequestBody("application/json".toMediaType())
                 val request = Request.Builder().url("${Config.currentBaseUrl}/enroll").post(body).build()
