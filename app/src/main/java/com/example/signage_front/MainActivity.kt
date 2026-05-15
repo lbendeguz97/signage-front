@@ -16,6 +16,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
@@ -24,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -96,6 +98,8 @@ class MainActivity : ComponentActivity() {
                         onSuccess = { 
                             Log.d(TAG, "Background check-in successful")
                             AdScheduler.startPolling(applicationContext)
+                            // Trigger immediate sync on startup
+                            scope.launch { AdScheduler.fetchAndSyncAdStatus(applicationContext) }
                         },
                         onFailure = { 
                             Log.w(TAG, "Background check-in failed, navigating to enrollment")
@@ -142,6 +146,8 @@ class MainActivity : ComponentActivity() {
                                                 onSuccess = { 
                                                     isEnrolled = true
                                                     AdScheduler.startPolling(applicationContext)
+                                                    // Trigger sync immediately after enrollment
+                                                    scope.launch { AdScheduler.fetchAndSyncAdStatus(applicationContext) }
                                                     navController.navigate("home") { 
                                                         popUpTo("enrollment") { inclusive = true } 
                                                     } 
@@ -157,17 +163,20 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         composable("ad") {
-                            val activeAd = ads.firstOrNull { it.adAllowed && it.syncStatus == "VERIFIED" }
-                            if (activeAd != null) {
-                                val localFile = MediaManager.getLocalFile(applicationContext, activeAd)
-                                val adContent = if (activeAd.mediaType == "video") {
-                                    AdContent.Video(videoUrl = localFile.absolutePath, redirectUrl = activeAd.url)
-                                } else {
-                                    AdContent.Html(url = activeAd.url ?: "", redirectUrl = activeAd.url)
+                            // Filter only verified ads to avoid playback issues
+                            val verifiedAds = ads.filter { it.adAllowed && it.syncStatus == "VERIFIED" }
+                            
+                            // If we enter this screen and have no content, force a sync retry
+                            LaunchedEffect(verifiedAds.isEmpty()) {
+                                if (verifiedAds.isEmpty() && isEnrolled) {
+                                    Log.d(TAG, "No verified ads found, triggering on-demand sync.")
+                                    AdScheduler.fetchAndSyncAdStatus(applicationContext)
                                 }
+                            }
 
+                            if (verifiedAds.isNotEmpty()) {
                                 AdScreen(
-                                    content = adContent,
+                                    ads = verifiedAds,
                                     onAdClick = { redirectUrl ->
                                         val fullQrUrl = Config.REDIRECT_ROOT.toHttpUrlOrNull()?.newBuilder()
                                             ?.addQueryParameter("url", redirectUrl)
@@ -180,7 +189,13 @@ class MainActivity : ComponentActivity() {
                                 )
                             } else {
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text("Waiting for ad content...")
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        CircularProgressIndicator()
+                                        Text(
+                                            text = "Preparing content...", 
+                                            modifier = Modifier.padding(top = 16.dp)
+                                        )
+                                    }
                                 }
                             }
                         }

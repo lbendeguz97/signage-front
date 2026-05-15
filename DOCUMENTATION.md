@@ -19,18 +19,21 @@
 ### mTLS Authentication
 The app uses Mutual TLS for all sensitive communication.
 - **Client Auth**: Private keys are generated and stored securely within the `AndroidKeyStore` (TEE/Hardware-backed).
-- **Network Security**: Configured via `network_security_config.xml` to trust a private Root CA and allow development traffic.
+- **Network Security**: Configured via `NetworkClientProvider` to trust a private Root CA (stored in `res/raw/ca_cert.pem`) and allow development traffic.
+- **Protocol Constraint**: All clients are forced to use **HTTP/1.1** to avoid ALPN-related hangs on specific Android/Server combinations.
 
 ### Enrollment Flow
 1. **Key Generation**: 2048-bit RSA KeyPair generated in KeyStore.
 2. **CSR Generation**: PKCS#10 Certificate Signing Request created using Bouncy Castle, using `Build.SERIAL` as Common Name (CN).
 3. **Registration**: CSR and OTP are sent via `POST /enroll`.
-4. **Certificate Storage**: Signed X.509 certificate received from server is stored in KeyStore alongside the private key.
+4. **Certificate Storage**: Signed X.509 certificate received from server is stored in KeyStore using `setKeyEntry` to maintain the chain without orphaning the private key.
 
-### Check-in
-On every startup, the app performs a `GET /checkin`. 
-- **Success (204)**: App proceeds to main functionality.
-- **Failure (401/403)**: App forces re-enrollment.
+### Check-in & Failover
+On startup, the app performs a connectivity check (`/echo`) across primary and backup URLs.
+- **Check-in (`GET /checkin`)**: 
+    - **Success (204)**: App proceeds to main functionality.
+    - **Failure (401/403)**: App forces re-enrollment.
+- **Failover**: If the primary `BASE_URL` is unreachable, the app automatically switches to `BASE_URL_BACKUP`.
 
 ---
 
@@ -39,12 +42,13 @@ On every startup, the app performs a `GET /checkin`.
 ### Room Database
 Located in `com.example.signage_front.data`.
 - **Entity (`AdStatus`)**: Stores ad metadata (ID, allowed status, path, display settings, checksum, and sync status).
+- **Entity (`SyncState`)**: Tracks synchronization timestamps to optimize server delta queries.
 - **Sync Mechanism**: A Transaction-based sync ensures the local DB is a mirror of the server. It inserts/updates new records and deletes orphaned records in one atomic step.
 
 ### Ad Repository (Manager Middleware)
 Orchestrates the lifecycle of data:
 1. Updates Database records.
-2. Triggers file downloads for new content.
+2. Triggers file downloads for new content via `MediaManager`.
 3. Verifies file integrity.
 4. Cleans up unused media files from storage.
 
@@ -58,7 +62,7 @@ Handles the local filesystem (`filesDir/media/`).
 - **Integrity Check**:
     - **Cheap Check**: Verification of file size against server metadata.
     - **Deep Check**: SHA-256 Checksum verification to prevent corruption or tampering.
-- **Cleanup**: Automatically deletes physical files when their corresponding DB record is removed.
+- **Sync Status**: Files transition from `PENDING` -> `DOWNLOADING` -> `VERIFIED`. Only `VERIFIED` content is displayed.
 
 ### Ad Scheduler
 - **Polling**: Background loop runs every 5 minutes.
@@ -70,27 +74,34 @@ Handles the local filesystem (`filesDir/media/`).
 
 ### Jetpack Compose Components
 - **`AdScreen`**: High-performance display using `Media3 ExoPlayer` (for video) and `Multiplatform WebView` (for HTML).
-    - *Kiosk Mode*: No playback controls or buttons are visible on video content.
+    - *Kiosk Mode*: No playback controls or buttons are visible.
 - **`HomeScreen`**: Interactive hub for user selection.
-- **`EnrollmentScreen`**: Clean UI for device registration with OTP input.
+- **`EnrollmentScreen`**: UI for device registration with OTP input.
+- **`QrCodeScreen`**: Displays a QR code generated from a redirect URL.
+- **`DebugScreen`**: Available only in `dev` environment to assist with connectivity issues.
+
+### Interaction Flow
+- Clicking an active Ad generates a QR code. The URL is constructed using `REDIRECT_ROOT` (defined in `Config.kt`) as a prefix for tracking and analytics.
 
 ---
 
 ## 6. System & Kiosk Features
 
 ### Screen Management
-- **Keep Screen On**: App prevents the device from dimming during active display.
+- **Keep Screen On**: App prevents the device from dimming during active display via `FLAG_KEEP_SCREEN_ON`.
 - **Auto-Wake/Unlock**: 
     - Detects `ACTION_SCREEN_OFF`.
-    - Schedules an `AlarmManager` wake-up for 60 seconds later.
-    - Uses `WakeLock` and legacy `KeyguardLock` flags (specifically for API 24) to force the screen on and bypass the lock screen.
+    - Schedules an `AlarmManager` wake-up for 60 seconds later via `WakeReceiver`.
+    - Uses `WakeLock` and `KeyguardLock` flags (specifically for API 24 compatibility) to force the screen on and bypass the lock screen.
 
 ---
 
 ## 7. Configuration
 Centrally managed in `com.example.signage_front.network.Config`.
-- **`BASE_URL`**: The single source of truth for the backend server address.
+- **`ENV`**: Toggles between `dev` (shows debug screens) and `prod`.
+- **`BASE_URL` / `BASE_URL_BACKUP`**: Server endpoint configuration.
+- **`REDIRECT_ROOT`**: The base URL for user-facing QR code redirects.
 
 ---
 
-*Last Updated: $(date +%Y-%m-%d)*
+*Last Updated: 2025-05-15*

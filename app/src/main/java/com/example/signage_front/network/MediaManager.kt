@@ -34,7 +34,8 @@ object MediaManager {
         Log.d(TAG, "Downloading media for ad_id: ${ad.adId}")
         
         val client = NetworkClientProvider.getMTlsClient(context)
-        val url = "${Config.BASE_URL}/getAd".toHttpUrlOrNull()?.newBuilder()
+        // Use currentBaseUrl to support failover
+        val url = "${Config.currentBaseUrl}/getAd".toHttpUrlOrNull()?.newBuilder()
             ?.addQueryParameter("ad_id", ad.adId)
             ?.build() ?: return false
 
@@ -63,7 +64,7 @@ object MediaManager {
         if (expectedHash == null) return true // Can't verify if no hash provided
         
         return try {
-            val digest = MessageDigest.getInstance("SHA-256")
+            val digest = MessageDigest.getInstance("SHA-1")
             file.inputStream().use { inputStream ->
                 val buffer = ByteArray(8192)
                 var bytesRead: Int

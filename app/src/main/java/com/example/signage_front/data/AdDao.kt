@@ -12,6 +12,9 @@ interface AdDao {
     @Query("SELECT * FROM ad_status")
     fun getAllAds(): Flow<List<AdStatus>>
 
+    @Query("SELECT * FROM ad_status")
+    suspend fun getAllAdsList(): List<AdStatus>
+
     @Query("SELECT * FROM ad_status WHERE adId = :adId")
     suspend fun getAdById(adId: String): AdStatus?
 

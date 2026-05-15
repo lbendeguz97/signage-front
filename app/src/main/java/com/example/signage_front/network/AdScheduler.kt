@@ -12,57 +12,153 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.Request
 import org.json.JSONArray
+import java.io.File
 
 /**
- * Handles scheduled requests to the server, such as polling for ad status.
+ * Handles scheduled requests to the server, such as polling for ad status and configuration.
  */
 object AdScheduler {
     private const val TAG = "AdScheduler"
+    private const val CONFIG_FILE = "app_config.json"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isPolling = false
 
     /**
-     * Starts polling for ad status. It performs one immediate request
-     * and then schedules subsequent requests every 5 minutes in the background.
+     * Starts polling. It checks the database status first and syncs only if needed.
      */
     fun startPolling(context: Context) {
         if (isPolling) return
         isPolling = true
         
         scope.launch {
-            // First execution happens immediately
-            fetchAndSyncAdStatus(context)
-            
-            // Background scheduling loop
             while (isActive) {
-                delay(5 * 60 * 1000) // Wait 5 minutes
-                fetchAndSyncAdStatus(context)
+                try {
+                    checkAndSync(context)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in polling loop", e)
+                }
+                delay(1 * 60 * 1000) // Check every 1 minute for changes
             }
         }
     }
 
     /**
-     * Public method to manually trigger a sync of the ad status.
+     * Orchestrates the sync process by checking the global database status.
+     * Tokens are compared as strings to avoid precision issues.
      */
-    suspend fun fetchAndSyncAdStatus(context: Context) {
-        try {
-            val jsonResponse = getAdStatusFromNetwork(context)
-            if (jsonResponse != null) {
-                Log.d(TAG, "Fetched new ad status, syncing with database and downloading media.")
-                syncAdStatus(context, jsonResponse)
+    private suspend fun checkAndSync(context: Context) {
+        Log.d(TAG, "Checking for database updates...")
+        val statusJson = getDatabaseStatusFromNetwork(context) ?: return
+        val statusArray = JSONArray(statusJson)
+        val repository = AdRepository(context)
+
+        var adRegistryChanged = false
+        var othersChanged = false
+        val pendingTokens = mutableMapOf<String, String>()
+        val otherTableNames = mutableListOf<String>()
+
+        for (i in 0 until statusArray.length()) {
+            val obj = statusArray.getJSONObject(i)
+            val tableName = obj.getString("table_name")
+            val serverToken = obj.getString("timestamp")
+
+            val localState = repository.getSyncState(tableName)
+            
+            if (localState == null || localState.timestamp != serverToken) {
+                Log.d(TAG, "Change detected in $tableName. Server: $serverToken, Local: ${localState?.timestamp ?: "None"}")
+                pendingTokens[tableName] = serverToken
+                if (tableName == "ad_registry") {
+                    adRegistryChanged = true
+                } else {
+                    othersChanged = true
+                    otherTableNames.add(tableName)
+                }
+            }
+        }
+
+        // 1. Sync Config if any "other" table changed
+        if (othersChanged) {
+            Log.d(TAG, "Syncing app configuration...")
+            if (fetchAndSyncConfig(context)) {
+                otherTableNames.forEach { table ->
+                    pendingTokens[table]?.let { token ->
+                        repository.updateSyncState(table, token)
+                    }
+                }
+                Log.d(TAG, "Config sync successful.")
+            }
+        }
+
+        // 2. Sync Ad Registry (metadata + media)
+        // We sync if the server registry changed OR if we have local ads that failed to sync previously
+        val localAds = repository.adDao.getAllAdsList()
+        val hasIncompleteAds = localAds.any { it.syncStatus != "VERIFIED" }
+
+        if (adRegistryChanged) {
+            Log.d(TAG, "Server registry changed. Fetching new ad list...")
+            if (fetchAndSyncAdStatus(context)) {
+                pendingTokens["ad_registry"]?.let { token ->
+                    repository.updateSyncState("ad_registry", token)
+                    Log.d(TAG, "Ad registry sync successful.")
+                }
+            }
+        } else if (hasIncompleteAds) {
+            Log.d(TAG, "Registry unchanged, but found incomplete local ads. Retrying sync...")
+            // Pass existing list back to repository.syncAds to retry downloads/verification
+            repository.syncAds(localAds)
+        } else {
+            Log.d(TAG, "Ad registry is up to date and all media is verified.")
+        }
+    }
+
+    private suspend fun getDatabaseStatusFromNetwork(context: Context): String? {
+        if (!SecurityManager.hasValidKey()) return null
+        val client = NetworkClientProvider.getMTlsClient(context)
+        val request = Request.Builder()
+            .url("${Config.currentBaseUrl}/getDatabaseStatus")
+            .get()
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) response.body?.string() else null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to fetch or sync ad status", e)
+            Log.e(TAG, "Failed to fetch database status", e)
+            null
         }
     }
 
-    /**
-     * Fetches the current ad status from the server via mTLS.
-     * Returns the raw JSON string.
-     */
+    private suspend fun fetchAndSyncConfig(context: Context): Boolean {
+        if (!SecurityManager.hasValidKey()) return false
+        val client = NetworkClientProvider.getMTlsClient(context)
+        val request = Request.Builder()
+            .url("${Config.currentBaseUrl}/getConfig")
+            .get()
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val configJson = response.body?.string() ?: return false
+                    val configFile = File(context.filesDir, CONFIG_FILE)
+                    configFile.writeText(configJson)
+                    true
+                } else false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch config", e)
+            false
+        }
+    }
+
+    suspend fun fetchAndSyncAdStatus(context: Context): Boolean {
+        val jsonResponse = getAdStatusFromNetwork(context) ?: return false
+        return syncAdStatus(context, jsonResponse)
+    }
+
     private fun getAdStatusFromNetwork(context: Context): String? {
         if (!SecurityManager.hasValidKey()) return null
-
         val client = NetworkClientProvider.getMTlsClient(context)
         val request = Request.Builder()
             .url("${Config.currentBaseUrl}/getAdStatus")
@@ -71,12 +167,7 @@ object AdScheduler {
 
         return try {
             client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    response.body?.string()
-                } else {
-                    Log.e(TAG, "getAdStatus network call failed: ${response.code}")
-                    null
-                }
+                if (response.isSuccessful) response.body?.string() else null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Network error during getAdStatus", e)
@@ -84,17 +175,13 @@ object AdScheduler {
         }
     }
 
-    /**
-     * Parses the JSON response, syncs it with the Room database, and manages media downloads.
-     */
-    private suspend fun syncAdStatus(context: Context, jsonContent: String) {
-        try {
+    private suspend fun syncAdStatus(context: Context, jsonContent: String): Boolean {
+        return try {
             val jsonArray = JSONArray(jsonContent)
             val adList = mutableListOf<AdStatus>()
 
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
-                // Determine media type - assuming it might come from server, or we infer it
                 val mediaType = if (obj.has("media_type")) {
                     obj.getString("media_type")
                 } else {
@@ -117,13 +204,11 @@ object AdScheduler {
                 )
             }
 
-            // The Repository now handles DB sync, Media Download, and Integrity Verification
             val repository = AdRepository(context)
             repository.syncAds(adList)
-
-            Log.d(TAG, "Full Sync (DB + Media) complete. Total ads: ${adList.size}")
         } catch (e: Exception) {
-            Log.e(TAG, "Error during sync or download process", e)
+            Log.e(TAG, "Error during ad sync process", e)
+            false
         }
     }
 
