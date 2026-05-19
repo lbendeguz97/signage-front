@@ -98,7 +98,6 @@ class MainActivity : ComponentActivity() {
                         onSuccess = { 
                             Log.d(TAG, "Background check-in successful")
                             AdScheduler.startPolling(applicationContext)
-                            // Trigger immediate sync on startup
                             scope.launch { AdScheduler.fetchAndSyncAdStatus(applicationContext) }
                         },
                         onFailure = { 
@@ -146,16 +145,17 @@ class MainActivity : ComponentActivity() {
                                                 onSuccess = { 
                                                     isEnrolled = true
                                                     AdScheduler.startPolling(applicationContext)
-                                                    // Trigger sync immediately after enrollment
                                                     scope.launch { AdScheduler.fetchAndSyncAdStatus(applicationContext) }
                                                     navController.navigate("home") { 
                                                         popUpTo("enrollment") { inclusive = true } 
                                                     } 
                                                 },
-                                                onFailure = { enrollmentError = "Check-in failed after enrollment." }
+                                                onFailure = { 
+                                                    enrollmentError = "Check-in failed after enrollment. Please verify server logs."
+                                                }
                                             )
                                         } else {
-                                            enrollmentError = "Enrollment failed. Please check your OTP."
+                                            enrollmentError = "Enrollment failed. Please check your OTP and try again."
                                         }
                                         isCheckingIn = false
                                     }
@@ -163,10 +163,8 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         composable("ad") {
-                            // Filter only verified ads to avoid playback issues
                             val verifiedAds = ads.filter { it.adAllowed && it.syncStatus == "VERIFIED" }
                             
-                            // If we enter this screen and have no content, force a sync retry
                             LaunchedEffect(verifiedAds.isEmpty()) {
                                 if (verifiedAds.isEmpty() && isEnrolled) {
                                     Log.d(TAG, "No verified ads found, triggering on-demand sync.")
@@ -233,7 +231,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        Log.d(TAG, "onNewIntent received - Re-applying kiosk flags")
         configureKioskWindow()
     }
 
@@ -258,16 +255,13 @@ class MainActivity : ComponentActivity() {
     private fun scheduleWakeUp(context: Context) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, WakeReceiver::class.java)
-        
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-
         val pendingIntent = PendingIntent.getBroadcast(context, 0, intent, flags)
         val triggerAt = SystemClock.elapsedRealtime() + 60_000
-        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
         } else {
@@ -283,17 +277,25 @@ class MainActivity : ComponentActivity() {
     private suspend fun checkIn(onSuccess: () -> Unit, onFailure: () -> Unit) {
         withContext(Dispatchers.IO) {
             if (!SecurityManager.hasValidKey()) {
+                Log.e(TAG, "Check-in aborted: No valid key found.")
                 withContext(Dispatchers.Main) { onFailure() }
                 return@withContext
             }
             try {
+                Log.d(TAG, "Attempting mTLS check-in...")
                 val client = NetworkClientProvider.getMTlsClient(applicationContext)
                 val request = Request.Builder().url("${Config.currentBaseUrl}/checkin").get().build()
                 client.newCall(request).execute().use { response ->
-                    if (response.code == 204) withContext(Dispatchers.Main) { onSuccess() }
-                    else withContext(Dispatchers.Main) { onFailure() }
+                    Log.d(TAG, "Check-in response code: ${response.code}")
+                    if (response.code == 204) {
+                        withContext(Dispatchers.Main) { onSuccess() }
+                    } else {
+                        Log.e(TAG, "Check-in failed with response: ${response.code}")
+                        withContext(Dispatchers.Main) { onFailure() }
+                    }
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Exception during check-in: ${e.message}", e)
                 withContext(Dispatchers.Main) { onFailure() }
             }
         }
@@ -316,13 +318,8 @@ class MainActivity : ComponentActivity() {
     private suspend fun tryEcho(url: String): Boolean {
         return try {
             val client = NetworkClientProvider.getStandardClient(applicationContext)
-            val request = Request.Builder()
-                .url("$url/echo")
-                .get()
-                .build()
-            client.newCall(request).execute().use { response ->
-                response.code == 204
-            }
+            val request = Request.Builder().url("$url/echo").get().build()
+            client.newCall(request).execute().use { response -> response.code == 204 }
         } catch (e: Exception) {
             Log.e(TAG, "Echo failed for $url: ${e.message}")
             false
@@ -332,20 +329,37 @@ class MainActivity : ComponentActivity() {
     private suspend fun enroll(otp: String): Boolean {
         return withContext(Dispatchers.IO) {
             try {
+                Log.d(TAG, "Starting enrollment process...")
                 SecurityManager.generateKeyPair()
-                val csr = SecurityManager.createCsr()
+                val csr = SecurityManager.createCsr(applicationContext)
                 val client = NetworkClientProvider.getStandardClient(applicationContext)
                 val json = JSONObject().apply { put("otp", otp); put("csr", csr) }
                 val body = json.toString().toRequestBody("application/json".toMediaType())
                 val request = Request.Builder().url("${Config.currentBaseUrl}/enroll").post(body).build()
                 client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val certPem = response.body?.string() ?: return@withContext false
-                        SecurityManager.saveCertificate(certPem)
-                        true
-                    } else false
+                    Log.d(TAG, "Enrollment request sent. Response code: ${response.code}")
+                    val responseBody = response.body?.string()
+                    if (response.isSuccessful && responseBody != null) {
+                        val responseJson = JSONObject(responseBody)
+                        val certPem = responseJson.optString("certificate")
+                        if (certPem.isNotEmpty()) {
+                            Log.d(TAG, "Certificate received, saving...")
+                            SecurityManager.saveCertificate(certPem)
+                            Log.d(TAG, "Enrollment successful")
+                            true
+                        } else {
+                            Log.e(TAG, "Enrollment successful but certificate field is missing or empty")
+                            false
+                        }
+                    } else {
+                        Log.e(TAG, "Enrollment failed on server: ${response.code} - $responseBody")
+                        false
+                    }
                 }
-            } catch (e: Exception) { false }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during enrollment: ${e.message}", e)
+                false
+            }
         }
     }
 }
