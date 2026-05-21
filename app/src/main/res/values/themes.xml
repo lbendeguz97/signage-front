@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.Signagefront" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Signagefront" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Make status bar and navigation bar transparent for true fullscreen -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- Draw content behind system bars -->
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowTranslucentNavigation">false</item>
+    </style>
 </resources>

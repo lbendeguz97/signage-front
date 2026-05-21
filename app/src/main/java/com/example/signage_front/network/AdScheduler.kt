@@ -1,5 +1,7 @@
 package com.example.signage_front.network
 
+//AdScheduler.kt
+
 import android.content.Context
 import android.util.Log
 import com.example.signage_front.data.AdRepository
@@ -213,11 +215,28 @@ object AdScheduler {
     }
 
     private fun inferMediaType(path: String): String {
-        return when {
-            path.endsWith(".mp4", ignoreCase = true) || path.endsWith(".mkv", ignoreCase = true) -> "video"
-            path.endsWith(".jpg", ignoreCase = true) || path.endsWith(".png", ignoreCase = true) -> "image"
-            path.endsWith(".html", ignoreCase = true) -> "html"
-            else -> "other"
+        val type = when {
+            path.endsWith(".mp4", ignoreCase = true) || 
+            path.endsWith(".mkv", ignoreCase = true) ||
+            path.endsWith(".webm", ignoreCase = true) ||
+            path.endsWith(".avi", ignoreCase = true) -> "video"
+            
+            path.endsWith(".jpg", ignoreCase = true) || 
+            path.endsWith(".jpeg", ignoreCase = true) ||
+            path.endsWith(".png", ignoreCase = true) ||
+            path.endsWith(".gif", ignoreCase = true) ||
+            path.endsWith(".webp", ignoreCase = true) ||
+            path.endsWith(".bmp", ignoreCase = true) -> "image"
+            
+            path.endsWith(".html", ignoreCase = true) ||
+            path.endsWith(".htm", ignoreCase = true) -> "html"
+            
+            else -> {
+                Log.w(TAG, "Unknown media type for path: $path, defaulting to 'image'")
+                "image"  // Default to image instead of "other" to prevent black screens
+            }
         }
+        Log.d(TAG, "Inferred mediaType='$type' for path: $path")
+        return type
     }
 }

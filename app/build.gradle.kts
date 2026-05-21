@@ -58,6 +58,7 @@ dependencies {
     implementation(libs.bouncycastle.pkix)
     implementation(libs.bouncycastle.prov)
     implementation(libs.zxing.core)
+    implementation("org.conscrypt:conscrypt-android:2.5.0")
     
     // Room
     implementation(libs.androidx.room.runtime)

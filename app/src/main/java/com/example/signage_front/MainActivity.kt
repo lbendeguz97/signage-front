@@ -11,10 +11,16 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -65,6 +71,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         enableEdgeToEdge()
 
         configureKioskWindow()
@@ -235,6 +242,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun configureKioskWindow() {
+        // Keep screen on
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Show when locked and turn screen on
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -245,11 +256,40 @@ class MainActivity : ComponentActivity() {
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
                         WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
             )
         }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Enable immersive fullscreen mode
+        enableImmersiveFullscreen()
+    }
+    
+    private fun enableImmersiveFullscreen() {
+        // Make content draw behind system bars
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        
+        val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
+        
+        // Hide both status bar and navigation bar
+        windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+        
+        // Use sticky immersive mode - bars will temporarily appear on swipe but auto-hide
+        windowInsetsController.systemBarsBehavior = 
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+    
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            // Re-apply immersive mode when window regains focus
+            enableImmersiveFullscreen()
+        }
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        // Re-apply immersive mode when activity resumes
+        enableImmersiveFullscreen()
     }
 
     private fun scheduleWakeUp(context: Context) {

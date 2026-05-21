@@ -1,5 +1,5 @@
 package com.example.signage_front.network
-
+//MediaManager.kt
 import android.content.Context
 import android.util.Log
 import com.example.signage_front.data.AdStatus

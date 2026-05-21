@@ -1,13 +1,16 @@
 package com.example.signage_front.ui.screens
 
 import android.graphics.BitmapFactory
+import android.view.TextureView
 import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -16,7 +19,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import com.example.signage_front.data.AdStatus
 import com.example.signage_front.network.MediaManager
 import com.multiplatform.webview.web.WebView
@@ -33,6 +35,12 @@ fun AdScreen(
     var currentIndex by remember { mutableIntStateOf(0) }
     val currentAd = if (ads.isNotEmpty()) ads[currentIndex % ads.size] else null
 
+    android.util.Log.d("AdScreen", "Composing AdScreen: ads.size=${ads.size}, currentIndex=$currentIndex, effectiveIndex=${if (ads.isNotEmpty()) currentIndex % ads.size else -1}")
+    ads.forEachIndexed { idx, ad ->
+        android.util.Log.d("AdScreen", "  Ad[$idx]: id=${ad.adId}, mediaType='${ad.mediaType}', path=${ad.path}, syncStatus=${ad.syncStatus}")
+    }
+    android.util.Log.d("AdScreen", "Current ad: adId=${currentAd?.adId}, mediaType='${currentAd?.mediaType}'")
+
     if (currentAd == null) {
         Box(modifier = modifier.fillMaxSize())
         return
@@ -41,26 +49,27 @@ fun AdScreen(
     val context = LocalContext.current
     val localFile = MediaManager.getLocalFile(context, currentAd)
 
-    // Callback for when an ad finishes. 
-    // Explicitly typed as () -> Unit to avoid inferred Int return from currentIndex++
     val onAdFinished: () -> Unit = {
+        android.util.Log.d("AdScreen", "onAdFinished called, advancing from index $currentIndex")
         currentIndex += 1
     }
 
+    // Use a Box with black background to prevent any flicker
     Box(
         modifier = modifier
             .fillMaxSize()
+            .background(Color.Black)
             .clickable {
                 currentAd.url?.let { onAdClick(it) }
             }
     ) {
-        // Use currentIndex as part of the key to force re-composition 
-        // and restart the media if there's only one ad in the list.
+        // Use currentIndex as part of the key to force re-composition
         key(currentIndex, currentAd.adId) {
-            when (currentAd.mediaType) {
+            when (currentAd.mediaType?.lowercase()) {
                 "video" -> {
                     VideoContent(
                         videoFile = localFile,
+                        playbackId = currentIndex,
                         onFinished = onAdFinished
                     )
                 }
@@ -78,6 +87,12 @@ fun AdScreen(
                         onFinished = onAdFinished
                     )
                 }
+                else -> {
+                    android.util.Log.e("AdScreen", "Unknown mediaType '${currentAd.mediaType}' for ad ${currentAd.adId}, skipping...")
+                    LaunchedEffect(currentAd.adId) {
+                        onAdFinished()
+                    }
+                }
             }
         }
     }
@@ -85,13 +100,13 @@ fun AdScreen(
 
 @Composable
 fun HtmlContent(
-    url: String, 
-    displayTimeSeconds: Int, 
+    url: String,
+    displayTimeSeconds: Int,
     onFinished: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val webViewState = rememberWebViewState(url = url)
-    
+
     LaunchedEffect(url) {
         delay(displayTimeSeconds * 1000L)
         onFinished()
@@ -110,77 +125,126 @@ fun HtmlContent(
 
 @Composable
 fun ImageContent(
-    imageFile: File, 
-    displayTimeSeconds: Int, 
+    imageFile: File,
+    displayTimeSeconds: Int,
     onFinished: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    android.util.Log.d("ImageContent", "ImageContent composing: file=${imageFile.name}, exists=${imageFile.exists()}, displayTime=$displayTimeSeconds")
+
     val bitmap = remember(imageFile.absolutePath) {
-        if (imageFile.exists()) {
-            BitmapFactory.decodeFile(imageFile.absolutePath)
-        } else null
+        val exists = imageFile.exists()
+        android.util.Log.d("ImageContent", "Loading bitmap: path=${imageFile.absolutePath}, exists=$exists")
+        if (exists) {
+            val bmp = BitmapFactory.decodeFile(imageFile.absolutePath)
+            android.util.Log.d("ImageContent", "Bitmap loaded: ${bmp?.width}x${bmp?.height}, null=${bmp == null}")
+            bmp
+        } else {
+            android.util.Log.e("ImageContent", "Image file does not exist: ${imageFile.absolutePath}")
+            null
+        }
     }
 
     LaunchedEffect(imageFile.absolutePath) {
+        android.util.Log.d("ImageContent", "Starting display timer: ${displayTimeSeconds}s for ${imageFile.name}")
         delay(displayTimeSeconds * 1000L)
         onFinished()
     }
 
-    bitmap?.let {
+    if (bitmap != null) {
+        android.util.Log.d("ImageContent", "Rendering image: ${bitmap.width}x${bitmap.height}")
         Image(
-            bitmap = it.asImageBitmap(),
+            bitmap = bitmap.asImageBitmap(),
             contentDescription = null,
             modifier = modifier.fillMaxSize(),
             contentScale = ContentScale.Fit
         )
+    } else {
+        android.util.Log.e("ImageContent", "Cannot render - bitmap is null!")
+        LaunchedEffect(Unit) {
+            onFinished()
+        }
     }
 }
 
+/**
+ * Video content using TextureView instead of SurfaceView.
+ * TextureView doesn't have the Z-ordering issues that SurfaceView has,
+ * which can cause black screens when switching between video and other content.
+ */
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoContent(
-    videoFile: File, 
+    videoFile: File,
+    playbackId: Int,
     onFinished: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
 
-    val exoPlayer = remember(videoFile.absolutePath) {
+    android.util.Log.d("VideoContent", "VideoContent composing with playbackId=$playbackId, file=${videoFile.name}")
+
+    // State to track if video has finished - prevents multiple onFinished calls
+    var hasFinished by remember(playbackId) { mutableStateOf(false) }
+
+    val exoPlayer = remember(playbackId) {
+        android.util.Log.d("VideoContent", "Creating new ExoPlayer for playbackId=$playbackId, file=${videoFile.absolutePath}")
         ExoPlayer.Builder(context).build().apply {
             val mediaItem = MediaItem.fromUri(videoFile.absolutePath)
             setMediaItem(mediaItem)
             prepare()
             playWhenReady = true
             repeatMode = Player.REPEAT_MODE_OFF
-            
+
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) {
+                    val stateName = when (state) {
+                        Player.STATE_IDLE -> "IDLE"
+                        Player.STATE_BUFFERING -> "BUFFERING"
+                        Player.STATE_READY -> "READY"
+                        Player.STATE_ENDED -> "ENDED"
+                        else -> "UNKNOWN($state)"
+                    }
+                    android.util.Log.d("VideoContent", "Playback state: $stateName (playbackId=$playbackId)")
+                    if (state == Player.STATE_ENDED && !hasFinished) {
+                        hasFinished = true
                         onFinished()
                     }
                 }
+
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    android.util.Log.e("VideoContent", "Playback error", error)
-                    onFinished() // Skip broken videos
+                    android.util.Log.e("VideoContent", "Playback error (playbackId=$playbackId): ${error.message}", error)
+                    if (!hasFinished) {
+                        hasFinished = true
+                        onFinished()
+                    }
                 }
             })
         }
     }
 
-    DisposableEffect(videoFile.absolutePath) {
+    DisposableEffect(playbackId) {
         onDispose {
+            android.util.Log.d("VideoContent", "Releasing ExoPlayer (playbackId=$playbackId)")
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
             exoPlayer.release()
         }
     }
 
+    // Use TextureView directly instead of PlayerView with SurfaceView
+    // TextureView works better with Compose's view hierarchy and doesn't have Z-ordering issues
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = false
-                resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            android.util.Log.d("VideoContent", "Creating TextureView (playbackId=$playbackId)")
+            TextureView(ctx).also { textureView ->
+                exoPlayer.setVideoTextureView(textureView)
             }
         },
-        modifier = modifier.fillMaxSize()
+        modifier = modifier.fillMaxSize(),
+        onRelease = { textureView ->
+            android.util.Log.d("VideoContent", "Releasing TextureView (playbackId=$playbackId)")
+            exoPlayer.clearVideoTextureView(textureView)
+        }
     )
 }
