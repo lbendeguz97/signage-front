@@ -21,6 +21,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.signage_front.data.AdStatus
 import com.example.signage_front.network.MediaManager
+import com.example.signage_front.network.Config
+import com.example.signage_front.ui.composables.FaceDetectionCameraPreview
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import com.multiplatform.webview.web.WebView
 import com.multiplatform.webview.web.rememberWebViewState
 import kotlinx.coroutines.delay
@@ -95,6 +99,29 @@ fun AdScreen(
                 }
             }
         }
+
+        // Add the Face Detection background analyzer and dev PIP HUD
+        var faceState by remember { mutableStateOf("No face detected") }
+        FaceDetectionCameraPreview(
+            onFaceAnalyzed = { result ->
+                if (result.isFacePresent) {
+                    val stateStr = "Face Detected | Age: ${result.age ?: "Unknown"} | Gender: ${result.gender ?: "Unknown"}"
+                    if (stateStr != faceState) {
+                        faceState = stateStr
+                        android.util.Log.d("AdScreen", "Audience Analysis update: $stateStr")
+                    }
+                } else {
+                    if (faceState != "No face detected") {
+                        faceState = "No face detected"
+                        android.util.Log.d("AdScreen", "Audience Analysis update: No face detected")
+                    }
+                }
+            },
+            showPreview = Config.ENV == "dev",
+            modifier = Modifier
+                .align(androidx.compose.ui.Alignment.TopEnd)
+                .padding(16.dp)
+        )
     }
 }
 

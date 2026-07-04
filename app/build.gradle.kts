@@ -38,6 +38,9 @@ android {
     buildFeatures {
         compose = true
     }
+    androidResources {
+        noCompress.add("tflite")
+    }
 }
 
 dependencies {
@@ -64,6 +67,19 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+
+    // CameraX
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+
+    // ML Kit Face Detection
+    implementation(libs.mlkit.face.detection)
+
+    // TensorFlow Lite
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.support)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

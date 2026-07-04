@@ -10,9 +10,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.signage_front.network.Config
+import com.example.signage_front.camera.FaceAnalysisResult
+import com.example.signage_front.ui.composables.FaceDetectionCameraPreview
 import java.net.NetworkInterface
 import java.util.*
 
@@ -56,6 +59,36 @@ fun DebugScreen(
         DebugItem("Device", "${Build.MANUFACTURER} ${Build.MODEL}")
         DebugItem("Serial (Pseudo)", Build.SERIAL)
         DebugItem("Timestamp", Date().toString())
+
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        Text(
+            text = "Audience Analyzer Diagnostics",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        var faceResult by remember { mutableStateOf<FaceAnalysisResult?>(null) }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(230.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            FaceDetectionCameraPreview(
+                onFaceAnalyzed = { result ->
+                    faceResult = result
+                },
+                showPreview = true,
+                modifier = Modifier.wrapContentSize()
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        DebugItem("Face Visible", if (faceResult?.isFacePresent == true) "YES" else "NO")
+        DebugItem("Estimated Gender", faceResult?.gender ?: "N/A")
+        DebugItem("Estimated Age", faceResult?.age?.toString() ?: "N/A")
 
         Spacer(modifier = Modifier.height(32.dp))
 
