@@ -56,6 +56,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import android.content.RestrictionsManager
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import java.nio.ByteBuffer
+import org.bouncycastle.util.encoders.Base32
 
 class MainActivity : ComponentActivity() {
     private val TAG = "SignageAuth"
@@ -113,8 +118,37 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 } else {
-                    navController.navigate("enrollment") {
-                        popUpTo("home") { inclusive = false }
+                    val regKey = getRegistrationKey(applicationContext)
+                    if (!regKey.isNullOrEmpty()) {
+                        Log.i(TAG, "Found registration key, navigating to enrollment and attempting automatic enrollment...")
+                        navController.navigate("enrollment") {
+                            popUpTo("home") { inclusive = false }
+                        }
+                        isCheckingIn = true
+                        enrollmentError = null
+                        val success = enroll(regKey)
+                        if (success) {
+                            checkIn(
+                                onSuccess = { 
+                                    isEnrolled = true
+                                    AdScheduler.startPolling(applicationContext)
+                                    scope.launch { AdScheduler.fetchAndSyncAdStatus(applicationContext) }
+                                    navController.navigate("home") { 
+                                        popUpTo("enrollment") { inclusive = true } 
+                                    } 
+                                },
+                                onFailure = { 
+                                    enrollmentError = "Check-in failed after automatic enrollment. Please verify server logs."
+                                }
+                            )
+                        } else {
+                            enrollmentError = "Automatic enrollment failed. Please check your registration key."
+                        }
+                        isCheckingIn = false
+                    } else {
+                        navController.navigate("enrollment") {
+                            popUpTo("home") { inclusive = false }
+                        }
                     }
                 }
             }
@@ -401,5 +435,59 @@ class MainActivity : ComponentActivity() {
                 false
             }
         }
+    }
+
+    private fun getRegistrationKey(context: Context): String? {
+        // First check Intent extras (great for ADB testing and direct launch overrides)
+        intent?.getStringExtra("registration_key")?.let {
+            if (it.isNotEmpty()) return it
+        }
+        
+        // Also check if any intent extra contains a JSON string with registration_key
+        intent?.extras?.let { extras ->
+            for (key in extras.keySet()) {
+                val value = extras.get(key)?.toString() ?: continue
+                if (value.trim().startsWith("{")) {
+                    try {
+                        val json = JSONObject(value)
+                        val regKey = json.optString("registration_key")
+                        if (!regKey.isNullOrEmpty()) {
+                            return regKey
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+        }
+
+        try {
+            val restrictionsManager = context.getSystemService(Context.RESTRICTIONS_SERVICE) as? RestrictionsManager
+                ?: return null
+            val appRestrictions = restrictionsManager.applicationRestrictions ?: return null
+            
+            // 1. Direct check
+            val directKey = appRestrictions.getString("registration_key")
+            if (!directKey.isNullOrEmpty()) {
+                return directKey
+            }
+            
+            // 2. Check for other keys that might contain a JSON string
+            for (key in appRestrictions.keySet()) {
+                val value = appRestrictions.getString(key) ?: continue
+                if (value.trim().startsWith("{")) {
+                    try {
+                        val json = JSONObject(value)
+                        val regKey = json.optString("registration_key")
+                        if (!regKey.isNullOrEmpty()) {
+                            return regKey
+                        }
+                    } catch (e: Exception) {
+                        // Not valid JSON or parsing failed
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading application restrictions: ${e.message}", e)
+        }
+        return null
     }
 }

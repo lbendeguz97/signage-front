@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">signage-front</string>
+    <string name="registration_key_title">Registration Key</string>
+    <string name="registration_key_desc">TOTP key for automatic enrollment</string>
 </resources>

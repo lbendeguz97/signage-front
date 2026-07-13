@@ -112,6 +112,50 @@ object NetworkClientProvider {
         return tmf.trustManagers[0] as X509TrustManager
     }
 
+    private val DockerDns = object : Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            if (hostname == "host.docker.internal") {
+                val addresses = mutableListOf<java.net.InetAddress>()
+                try {
+                    val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+                    while (interfaces.hasMoreElements()) {
+                        val netInterface = interfaces.nextElement()
+                        if (netInterface.isLoopback || !netInterface.isUp) continue
+                        val interfaceAddresses = netInterface.inetAddresses
+                        while (interfaceAddresses.hasMoreElements()) {
+                            val addr = interfaceAddresses.nextElement()
+                            if (addr is java.net.Inet4Address) {
+                                val bytes = addr.address
+                                bytes[3] = 1.toByte()
+                                addresses.add(java.net.InetAddress.getByAddress(hostname, bytes))
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to detect gateway dynamically: ${e.message}")
+                }
+                
+                // Fallbacks
+                val fallbacks = listOf(
+                    byteArrayOf(172.toByte(), 23.toByte(), 0.toByte(), 1.toByte()),
+                    byteArrayOf(172.toByte(), 17.toByte(), 0.toByte(), 1.toByte()),
+                    byteArrayOf(10.toByte(), 0.toByte(), 2.toByte(), 2.toByte())
+                )
+                for (fb in fallbacks) {
+                    try {
+                        val addr = java.net.InetAddress.getByAddress(hostname, fb)
+                        if (addresses.none { it.hostAddress == addr.hostAddress }) {
+                            addresses.add(addr)
+                        }
+                    } catch (ignored: Exception) {}
+                }
+                Log.d(TAG, "Resolved host.docker.internal to: ${addresses.joinToString { it.hostAddress }}")
+                return addresses
+            }
+            return Dns.SYSTEM.lookup(hostname)
+        }
+    }
+
     fun getMTlsClient(context: Context): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
@@ -163,6 +207,7 @@ object NetworkClientProvider {
             .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .dns(DockerDns)
             .build()
     }
 
@@ -182,6 +227,7 @@ object NetworkClientProvider {
             .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .dns(DockerDns)
             .build()
     }
 }

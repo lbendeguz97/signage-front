@@ -89,3 +89,17 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+
+tasks.register<Exec>("runPostCompileScript") {
+    dependsOn("assembleDebug")
+    group = "custom"
+    description = "Runs the postcompile.sh script to deploy the built APK to a connected device."
+    
+    workingDir(project.rootDir)
+    executable = "bash"
+    args("${project.rootDir}/postcompile.sh")
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    finalizedBy("runPostCompileScript")
+}
