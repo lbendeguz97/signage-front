@@ -5,10 +5,11 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [AdStatus::class, SyncState::class], version = 5, exportSchema = false)
+@Database(entities = [AdStatus::class, SyncState::class, AdDisplayLog::class], version = 6, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun adDao(): AdDao
     abstract fun syncDao(): SyncDao
+    abstract fun adDisplayLogDao(): AdDisplayLogDao
 
     companion object {
         @Volatile

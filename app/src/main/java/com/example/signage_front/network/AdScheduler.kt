@@ -6,14 +6,18 @@ import android.content.Context
 import android.util.Log
 import com.example.signage_front.data.AdRepository
 import com.example.signage_front.data.AdStatus
+import com.example.signage_front.data.AdDisplayLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 
 /**
@@ -31,6 +35,8 @@ object AdScheduler {
     fun startPolling(context: Context) {
         if (isPolling) return
         isPolling = true
+        
+        startLogSync(context)
         
         scope.launch {
             while (isActive) {
@@ -154,9 +160,9 @@ object AdScheduler {
         }
     }
 
-    suspend fun fetchAndSyncAdStatus(context: Context): Boolean {
-        val jsonResponse = getAdStatusFromNetwork(context) ?: return false
-        return syncAdStatus(context, jsonResponse)
+    suspend fun fetchAndSyncAdStatus(context: Context): Boolean = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val jsonResponse = getAdStatusFromNetwork(context) ?: return@withContext false
+        syncAdStatus(context, jsonResponse)
     }
 
     private fun getAdStatusFromNetwork(context: Context): String? {
@@ -238,5 +244,83 @@ object AdScheduler {
         }
         Log.d(TAG, "Inferred mediaType='$type' for path: $path")
         return type
+    }
+
+    fun getLogSyncTime(context: Context): Int {
+        val configFile = File(context.filesDir, CONFIG_FILE)
+        if (!configFile.exists()) return -1
+        return try {
+            val json = JSONObject(configFile.readText())
+            val configObj = json.optJSONObject("config")
+            configObj?.optInt("logSyncTime", -1) ?: json.optInt("logSyncTime", -1)
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
+    private var isLogSyncActive = false
+    fun startLogSync(context: Context) {
+        if (isLogSyncActive) return
+        isLogSyncActive = true
+        scope.launch {
+            while (isActive) {
+                val logSyncTime = getLogSyncTime(context)
+                if (logSyncTime > 0) {
+                    try {
+                        uploadPendingLogs(context)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in periodic log sync", e)
+                    }
+                    delay(logSyncTime * 1000L)
+                } else {
+                    delay(10 * 1000L) // check again in 10s if setting changed
+                }
+            }
+        }
+    }
+
+    suspend fun uploadPendingLogs(context: Context) {
+        val repository = AdRepository(context)
+        val pendingLogs = repository.adDisplayLogDao.getPendingLogs()
+        if (pendingLogs.isEmpty()) return
+
+        Log.d(TAG, "Attempting to sync ${pendingLogs.size} display logs...")
+        if (!SecurityManager.hasValidKey()) return
+
+        val client = NetworkClientProvider.getMTlsClient(context)
+        val jsonArray = JSONArray()
+        pendingLogs.forEach { log ->
+            val obj = JSONObject().apply {
+                put("ad_id", log.adId)
+                put("timestamp", log.timestamp)
+                put("duration_ms", log.durationMs)
+                put("clicked", log.clicked)
+                put("exited_screen", log.exitedScreen)
+                if (log.audienceAge != null) put("audience_age", log.audienceAge)
+                if (log.audienceGender != null) put("audience_gender", log.audienceGender)
+            }
+            jsonArray.put(obj)
+        }
+
+        val requestBody = jsonArray.toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("${Config.currentBaseUrl}/uploadLogs")
+            .post(requestBody)
+            .build()
+
+        try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful || response.code == 204 || response.code == 200) {
+                    val ids = pendingLogs.map { it.id }
+                    repository.adDisplayLogDao.markLogsSynced(ids)
+                    repository.adDisplayLogDao.deleteSyncedLogs() // Cleanup synced logs
+                    Log.i(TAG, "Successfully synced and cleaned up ${pendingLogs.size} logs.")
+                } else {
+                    Log.w(TAG, "Log upload failed with code ${response.code}: ${response.body?.string()}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error uploading logs to server", e)
+        }
     }
 }

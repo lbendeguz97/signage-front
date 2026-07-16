@@ -3,37 +3,58 @@ package com.example.signage_front.ui.screens
 import android.graphics.BitmapFactory
 import android.view.TextureView
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.signage_front.data.AdStatus
+import com.example.signage_front.data.AdDisplayLog
+import com.example.signage_front.data.AdRepository
+import com.example.signage_front.network.AdScheduler
 import com.example.signage_front.network.MediaManager
 import com.example.signage_front.network.Config
 import com.example.signage_front.ui.composables.FaceDetectionCameraPreview
-import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.unit.dp
 import com.multiplatform.webview.web.WebView
 import com.multiplatform.webview.web.rememberWebViewState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 import java.io.File
 
 @Composable
 fun AdScreen(
     ads: List<AdStatus>,
     onAdClick: (String) -> Unit,
+    onBackToHome: () -> Unit,
+    onNavigateToDebug: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var currentIndex by remember { mutableIntStateOf(0) }
@@ -51,11 +72,104 @@ fun AdScreen(
     }
 
     val context = LocalContext.current
+    val repository = remember(context) { AdRepository(context) }
+    val scope = rememberCoroutineScope()
+
+    // Tracks the active ad play session
+    val playSession = remember(currentIndex, currentAd.adId) {
+        AdPlaySession(currentAd.adId)
+    }
+
+    // Helper function to save a play log session
+    val savePlayLog: (AdPlaySession) -> Unit = remember(repository, context) {
+        { session ->
+            if (!session.logSaved) {
+                session.logSaved = true
+                val duration = System.currentTimeMillis() - session.startTime
+                val log = AdDisplayLog(
+                    adId = session.adId,
+                    timestamp = session.startTime,
+                    durationMs = duration,
+                    clicked = session.clicked,
+                    exitedScreen = session.exitedScreen,
+                    audienceAge = session.audienceAge,
+                    audienceGender = session.audienceGender
+                )
+                android.util.Log.d("AdScreenLog", "Logging ad display: adId=${log.adId}, duration=${log.durationMs}ms, clicked=${log.clicked}, exited=${log.exitedScreen}, age=${log.audienceAge}, gender=${log.audienceGender}")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        repository.insertDisplayLog(log)
+                        val logSyncTime = AdScheduler.getLogSyncTime(context)
+                        if (logSyncTime == 0) {
+                            AdScheduler.uploadPendingLogs(context)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("AdScreenLog", "Failed to save display log", e)
+                    }
+                }
+            }
+        }
+    }
+
+    // Track screen exit (compositions disposal)
+    DisposableEffect(playSession) {
+        onDispose {
+            if (!playSession.logSaved) {
+                playSession.exitedScreen = true
+                savePlayLog(playSession)
+            }
+        }
+    }
+
     val localFile = MediaManager.getLocalFile(context, currentAd)
 
     val onAdFinished: () -> Unit = {
         android.util.Log.d("AdScreen", "onAdFinished called, advancing from index $currentIndex")
+        if (!playSession.logSaved) {
+            savePlayLog(playSession)
+        }
         currentIndex += 1
+    }
+
+    val density = LocalDensity.current
+    val edgeThresholdPx = remember(density) { with(density) { 60.dp.toPx() } }
+    val dragThresholdPx = remember(density) { with(density) { 50.dp.toPx() } }
+    var showMenu by remember { mutableStateOf(false) }
+    var menuInteractionTime by remember { mutableLongStateOf(0L) }
+
+    // Detect drag from left edge to show the menu
+    val swipeModifier = Modifier.pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (down.position.x < edgeThresholdPx) {
+                var totalDragX = 0f
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id }
+                    if (change == null || !change.pressed) {
+                        break
+                    }
+                    val currentX = change.position.x
+                    val previousX = change.previousPosition.x
+                    totalDragX += (currentX - previousX)
+                    
+                    if (totalDragX > dragThresholdPx) {
+                        change.consume()
+                        showMenu = true
+                        menuInteractionTime = System.currentTimeMillis()
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-timeout for the menu overlay after 10 seconds of no interaction
+    LaunchedEffect(showMenu, menuInteractionTime) {
+        if (showMenu) {
+            delay(10000L)
+            showMenu = false
+        }
     }
 
     // Use a Box with black background to prevent any flicker
@@ -63,7 +177,13 @@ fun AdScreen(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
+            .then(swipeModifier)
             .clickable {
+                if (!playSession.logSaved) {
+                    playSession.clicked = true
+                    playSession.exitedScreen = true
+                    savePlayLog(playSession)
+                }
                 currentAd.url?.let { onAdClick(it) }
             }
     ) {
@@ -110,6 +230,9 @@ fun AdScreen(
                         faceState = stateStr
                         android.util.Log.d("AdScreen", "Audience Analysis update: $stateStr")
                     }
+                    // Capture demographics inside active playSession
+                    playSession.audienceAge = result.age?.toString() ?: playSession.audienceAge
+                    playSession.audienceGender = result.gender ?: playSession.audienceGender
                 } else {
                     if (faceState != "No face detected") {
                         faceState = "No face detected"
@@ -122,7 +245,146 @@ fun AdScreen(
                 .align(androidx.compose.ui.Alignment.TopEnd)
                 .padding(16.dp)
         )
+
+        // Transparent scrim overlay behind the menu to dismiss it when clicked outside
+        if (showMenu) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showMenu = false
+                    }
+            )
+        }
+
+        // Floating Sidebar Menu Overlay (No background container or panel behind them)
+        AnimatedVisibility(
+            visible = showMenu,
+            enter = slideInHorizontally(initialOffsetX = { -it }),
+            exit = slideOutHorizontally(targetOffsetX = { -it }),
+            modifier = Modifier.align(Alignment.CenterStart)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(220.dp)
+                    .pointerInput(Unit) {
+                        // Reset the timeout timer on any touch interaction
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent()
+                                menuInteractionTime = System.currentTimeMillis()
+                            }
+                        }
+                    }
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 16.dp, top = 16.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+                horizontalAlignment = Alignment.Start
+            ) {
+                FloatingMenuButton(
+                    icon = "🍽️",
+                    text = "Éttermek",
+                    onClick = {
+                        if (!playSession.logSaved) {
+                            playSession.exitedScreen = true
+                            savePlayLog(playSession)
+                        }
+                        showMenu = false
+                        onBackToHome()
+                    }
+                )
+                
+                FloatingMenuButton(
+                    icon = "🏨",
+                    text = "Szállodák",
+                    onClick = {
+                        if (!playSession.logSaved) {
+                            playSession.exitedScreen = true
+                            savePlayLog(playSession)
+                        }
+                        showMenu = false
+                        onBackToHome()
+                    }
+                )
+                
+                FloatingMenuButton(
+                    icon = "🎭",
+                    text = "Szórakozás",
+                    onClick = {
+                        if (!playSession.logSaved) {
+                            playSession.exitedScreen = true
+                            savePlayLog(playSession)
+                        }
+                        showMenu = false
+                        onBackToHome()
+                    }
+                )
+                
+                FloatingMenuButton(
+                    icon = "📢",
+                    text = "Reklám",
+                    onClick = {
+                        showMenu = false
+                    }
+                )
+            }
+        }
     }
+}
+
+@Composable
+private fun FloatingMenuButton(
+    icon: String,
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = colorResource(id = com.example.signage_front.R.color.green),
+            contentColor = Color.White
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier
+            .width(180.dp)
+            .height(60.dp)
+            .shadow(elevation = 6.dp, shape = RoundedCornerShape(16.dp)),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Start
+        ) {
+            Text(
+                text = icon,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(end = 12.dp)
+            )
+            Text(
+                text = text,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+private class AdPlaySession(
+    val adId: String,
+    val startTime: Long = System.currentTimeMillis()
+) {
+    var clicked: Boolean = false
+    var exitedScreen: Boolean = false
+    var logSaved: Boolean = false
+    var audienceAge: String? = null
+    var audienceGender: String? = null
 }
 
 @Composable

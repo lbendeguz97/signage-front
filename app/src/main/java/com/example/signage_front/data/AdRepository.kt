@@ -9,6 +9,7 @@ class AdRepository(private val context: Context) {
     private val TAG = "AdRepository"
     private val database = AppDatabase.getDatabase(context)
     val adDao = database.adDao()
+    val adDisplayLogDao = database.adDisplayLogDao()
     private val syncDao = database.syncDao()
 
     fun getAllAds(): Flow<List<AdStatus>> = adDao.getAllAds()
@@ -91,5 +92,9 @@ class AdRepository(private val context: Context) {
         adDao.clearAdStatus()
         syncDao.clearAllSyncStates()
         MediaManager.cleanupOrphanedMedia(context, emptyList())
+    }
+
+    suspend fun insertDisplayLog(log: AdDisplayLog) {
+        database.adDisplayLogDao().insertLog(log)
     }
 }

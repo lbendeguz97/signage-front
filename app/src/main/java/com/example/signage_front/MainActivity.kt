@@ -224,6 +224,14 @@ class MainActivity : ComponentActivity() {
                                         
                                         val encodedUrl = URLEncoder.encode(fullQrUrl, StandardCharsets.UTF_8.toString())
                                         navController.navigate("qrcode/$encodedUrl")
+                                    },
+                                    onBackToHome = {
+                                        navController.navigate("home") {
+                                            popUpTo("home") { inclusive = true }
+                                        }
+                                    },
+                                    onNavigateToDebug = {
+                                        navController.navigate("debug")
                                     }
                                 )
                             } else {
