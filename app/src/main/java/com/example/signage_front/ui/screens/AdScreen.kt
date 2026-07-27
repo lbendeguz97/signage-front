@@ -6,17 +6,31 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.snapping.SnapLayoutInfoProvider
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
+import androidx.compose.foundation.gestures.snapping.SnapPosition
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Restaurant
+import androidx.compose.material.icons.filled.Hotel
+import androidx.compose.material.icons.filled.TheaterComedy
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -136,6 +150,56 @@ fun AdScreen(
     val dragThresholdPx = remember(density) { with(density) { 50.dp.toPx() } }
     var showMenu by remember { mutableStateOf(false) }
     var menuInteractionTime by remember { mutableLongStateOf(0L) }
+
+    val menuItems = remember {
+        listOf(
+            MenuItem("Éttermek", Icons.Filled.Restaurant) {
+                if (!playSession.logSaved) {
+                    playSession.exitedScreen = true
+                    savePlayLog(playSession)
+                }
+                showMenu = false
+                onBackToHome()
+            },
+            MenuItem("Szállodák", Icons.Filled.Hotel) {
+                if (!playSession.logSaved) {
+                    playSession.exitedScreen = true
+                    savePlayLog(playSession)
+                }
+                showMenu = false
+                onBackToHome()
+            },
+            MenuItem("Szórakozás", Icons.Filled.TheaterComedy) {
+                if (!playSession.logSaved) {
+                    playSession.exitedScreen = true
+                    savePlayLog(playSession)
+                }
+                showMenu = false
+                onBackToHome()
+            },
+            MenuItem("Reklám", Icons.Filled.Campaign) {
+                showMenu = false
+            }
+        )
+    }
+
+    var visibleItemsCount by remember { mutableIntStateOf(0) }
+    var isMenuExpansionUnlocked by remember { mutableStateOf(false) }
+    LaunchedEffect(showMenu) {
+        if (showMenu) {
+            isMenuExpansionUnlocked = false
+            visibleItemsCount = 0
+            for (i in 1..menuItems.size) {
+                delay(120L)
+                visibleItemsCount = i
+            }
+            delay(150L) // Wait for items to fully settle into their spots
+            isMenuExpansionUnlocked = true
+        } else {
+            isMenuExpansionUnlocked = false
+            visibleItemsCount = 0
+        }
+    }
 
     // Detect drag from left edge to show the menu
     val swipeModifier = Modifier.pointerInput(Unit) {
@@ -260,121 +324,155 @@ fun AdScreen(
             )
         }
 
+        val menuOffset by animateDpAsState(
+            targetValue = if (showMenu) 0.dp else (-220).dp,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = Spring.StiffnessMedium
+            ),
+            label = "menuOffset"
+        )
+
         // Floating Sidebar Menu Overlay (No background container or panel behind them)
-        AnimatedVisibility(
-            visible = showMenu,
-            enter = slideInHorizontally(initialOffsetX = { -it }),
-            exit = slideOutHorizontally(targetOffsetX = { -it }),
-            modifier = Modifier.align(Alignment.CenterStart)
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(220.dp)
+                .offset(x = menuOffset)
+                .align(Alignment.CenterStart)
+                .pointerInput(Unit) {
+                    // Reset the timeout timer on any touch interaction
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent()
+                            menuInteractionTime = System.currentTimeMillis()
+                        }
+                    }
+                }
+                .padding(start = 16.dp, top = 16.dp, bottom = 16.dp),
+            contentAlignment = Alignment.CenterStart
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(220.dp)
-                    .pointerInput(Unit) {
-                        // Reset the timeout timer on any touch interaction
-                        awaitPointerEventScope {
-                            while (true) {
-                                awaitPointerEvent()
-                                menuInteractionTime = System.currentTimeMillis()
+            val maxHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
+            val itemHeightPx = with(LocalDensity.current) { 60.dp.toPx() }
+            // Calculate scroll offset so item centers align with viewport center.
+            val centerScrollOffset = - (maxHeightPx / 2 - itemHeightPx / 2).toInt()
+
+            val centerOffset = 5000 - (5000 % menuItems.size)
+            val lazyListState = rememberLazyListState(
+                initialFirstVisibleItemIndex = centerOffset,
+                initialFirstVisibleItemScrollOffset = centerScrollOffset
+            )
+            val snappingLayout = remember(lazyListState) {
+                SnapLayoutInfoProvider(lazyListState, SnapPosition.Center)
+            }
+            val snapFlingBehavior = rememberSnapFlingBehavior(snappingLayout)
+
+            var isInitialScrollCompleted by remember { mutableStateOf(false) }
+
+            LaunchedEffect(showMenu) {
+                if (showMenu) {
+                    isInitialScrollCompleted = false
+                    lazyListState.scrollToItem(centerOffset, centerScrollOffset)
+                    isInitialScrollCompleted = true
+                } else {
+                    isInitialScrollCompleted = false
+                }
+            }
+
+            val centerIndex by remember {
+                derivedStateOf {
+                    val layoutInfo = lazyListState.layoutInfo
+                    val visibleItems = layoutInfo.visibleItemsInfo
+                    if (visibleItems.isEmpty()) -1
+                    else {
+                        val viewportCenter = (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) / 2f
+                        visibleItems.minByOrNull { item ->
+                            val itemCenter = item.offset + item.size / 2f
+                            kotlin.math.abs(itemCenter - viewportCenter)
+                        }?.index ?: -1
+                    }
+                }
+            }
+
+            LazyColumn(
+                state = lazyListState,
+                flingBehavior = snapFlingBehavior,
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically),
+                horizontalAlignment = Alignment.Start
+            ) {
+                items(10000) { index ->
+                    val itemIndex = index % menuItems.size
+                    val item = menuItems[itemIndex]
+                    val isItemVisible = visibleItemsCount > itemIndex
+
+                    AnimatedVisibility(
+                        visible = isItemVisible,
+                        enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+                        exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
+                    ) {
+                        val isCenter = isInitialScrollCompleted && isMenuExpansionUnlocked && (index == centerIndex)
+                        val boxWidth by animateDpAsState(
+                            targetValue = if (isCenter) 200.dp else 60.dp,
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioLowBouncy,
+                                stiffness = Spring.StiffnessLow
+                            ),
+                            label = "boxWidth"
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .width(boxWidth)
+                                .height(60.dp)
+                                .background(Color.Black, shape = RoundedCornerShape(12.dp))
+                                .border(2.dp, Color.White, shape = RoundedCornerShape(12.dp))
+                                .clickable { item.onClick() },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            // Static square container on the left for the icon
+                            Box(
+                                modifier = Modifier.size(56.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = item.icon,
+                                    contentDescription = item.text,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            // Text displayed only when expanded
+                            if (isCenter && boxWidth > 100.dp) {
+                                Row(
+                                    modifier = Modifier
+                                        .padding(start = 56.dp, end = 20.dp)
+                                        .fillMaxHeight(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = item.text,
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
-                    .verticalScroll(rememberScrollState())
-                    .padding(start = 16.dp, top = 16.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-                horizontalAlignment = Alignment.Start
-            ) {
-                FloatingMenuButton(
-                    icon = "🍽️",
-                    text = "Éttermek",
-                    onClick = {
-                        if (!playSession.logSaved) {
-                            playSession.exitedScreen = true
-                            savePlayLog(playSession)
-                        }
-                        showMenu = false
-                        onBackToHome()
-                    }
-                )
-                
-                FloatingMenuButton(
-                    icon = "🏨",
-                    text = "Szállodák",
-                    onClick = {
-                        if (!playSession.logSaved) {
-                            playSession.exitedScreen = true
-                            savePlayLog(playSession)
-                        }
-                        showMenu = false
-                        onBackToHome()
-                    }
-                )
-                
-                FloatingMenuButton(
-                    icon = "🎭",
-                    text = "Szórakozás",
-                    onClick = {
-                        if (!playSession.logSaved) {
-                            playSession.exitedScreen = true
-                            savePlayLog(playSession)
-                        }
-                        showMenu = false
-                        onBackToHome()
-                    }
-                )
-                
-                FloatingMenuButton(
-                    icon = "📢",
-                    text = "Reklám",
-                    onClick = {
-                        showMenu = false
-                    }
-                )
+                }
             }
         }
     }
 }
 
-@Composable
-private fun FloatingMenuButton(
-    icon: String,
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = colorResource(id = com.example.signage_front.R.color.green),
-            contentColor = Color.White
-        ),
-        shape = RoundedCornerShape(16.dp),
-        modifier = modifier
-            .width(180.dp)
-            .height(60.dp)
-            .shadow(elevation = 6.dp, shape = RoundedCornerShape(16.dp)),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxSize(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Start
-        ) {
-            Text(
-                text = icon,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(end = 12.dp)
-            )
-            Text(
-                text = text,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
+private data class MenuItem(
+    val text: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val onClick: () -> Unit
+)
 
 private class AdPlaySession(
     val adId: String,
