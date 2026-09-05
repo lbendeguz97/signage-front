@@ -25,8 +25,14 @@ object MediaManager {
     suspend fun downloadMediaIfNeeded(context: Context, ad: AdStatus): Boolean {
         val localFile = getLocalFile(context, ad)
         
-        // If file exists and size matches, we might still want to verify checksum later
-        if (localFile.exists() && localFile.length() == ad.expectedSize) {
+        // 1. If file exists and checksum matches, skip downloading
+        if (localFile.exists() && ad.expectedChecksum != null && verifyChecksum(localFile, ad.expectedChecksum)) {
+            Log.d(TAG, "Media already exists and checksum is verified: ${ad.path}")
+            return true
+        }
+
+        // 2. Fallback to size-based check if checksum is not available but size is specified
+        if (localFile.exists() && ad.expectedSize > 0L && localFile.length() == ad.expectedSize) {
             Log.d(TAG, "Media already exists with correct size: ${ad.path}")
             return true
         }

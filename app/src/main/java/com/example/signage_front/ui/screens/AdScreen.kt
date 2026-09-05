@@ -48,8 +48,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import com.example.signage_front.network.SspCacheManager
+import com.example.signage_front.data.CachedSspAd
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.signage_front.data.AdStatus
+import com.example.signage_front.data.PlaylistItem
 import com.example.signage_front.data.AdDisplayLog
 import com.example.signage_front.data.AdRepository
 import com.example.signage_front.network.AdScheduler
@@ -65,39 +68,55 @@ import java.io.File
 
 @Composable
 fun AdScreen(
-    ads: List<AdStatus>,
+    items: List<PlaylistItem>,
     onAdClick: (String) -> Unit,
     onBackToHome: () -> Unit,
     onNavigateToDebug: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    pendingInterruptPriority: String? = null,
+    onTriggerLoopComplete: (() -> Unit)? = null
 ) {
     var currentIndex by remember { mutableIntStateOf(0) }
-    val currentAd = if (ads.isNotEmpty()) ads[currentIndex % ads.size] else null
+    val currentItem = if (items.isNotEmpty()) items[currentIndex % items.size] else null
 
-    android.util.Log.d("AdScreen", "Composing AdScreen: ads.size=${ads.size}, currentIndex=$currentIndex, effectiveIndex=${if (ads.isNotEmpty()) currentIndex % ads.size else -1}")
-    ads.forEachIndexed { idx, ad ->
-        android.util.Log.d("AdScreen", "  Ad[$idx]: id=${ad.adId}, mediaType='${ad.mediaType}', path=${ad.path}, syncStatus=${ad.syncStatus}")
+    // The AdStatus backing the current item, if any (used for play-session logging).
+    val currentAd = when (currentItem) {
+        is PlaylistItem.Standard -> currentItem.adStatus
+        else -> null
     }
-    android.util.Log.d("AdScreen", "Current ad: adId=${currentAd?.adId}, mediaType='${currentAd?.mediaType}'")
 
-    if (currentAd == null) {
+    android.util.Log.d("AdScreen", "Composing AdScreen: items.size=${items.size}, currentIndex=$currentIndex, effectiveIndex=${if (items.isNotEmpty()) currentIndex % items.size else -1}")
+    items.forEachIndexed { idx, item ->
+        android.util.Log.d("AdScreen", "  Item[$idx]: ${describeItem(item)}")
+    }
+    android.util.Log.d("AdScreen", "Current item: ${currentItem?.let { describeItem(it) }}")
+
+    if (currentItem == null) {
         Box(modifier = modifier.fillMaxSize())
         return
+    }
+
+    // Effective display time for the current item (used by image/html/ssp branches).
+    val effectiveDisplayTime = when (currentItem) {
+        is PlaylistItem.Standard -> currentItem.durationOverride ?: currentItem.adStatus.displayTime ?: 10
+        is PlaylistItem.VirtualSsp -> currentItem.durationBudget
+        else -> 10
     }
 
     val context = LocalContext.current
     val repository = remember(context) { AdRepository(context) }
     val scope = rememberCoroutineScope()
 
-    // Tracks the active ad play session
-    val playSession = remember(currentIndex, currentAd.adId) {
-        AdPlaySession(currentAd.adId)
+    // Tracks the active ad play session. Only backed-by-an-ad items (Standard/VirtualSsp)
+    // produce a loggable session; logo/group-SSP items have no ad id.
+    val playSession = remember(currentIndex, currentAd?.adId) {
+        if (currentAd != null) AdPlaySession(currentAd.adId) else null
     }
 
-    // Helper function to save a play log session
-    val savePlayLog: (AdPlaySession) -> Unit = remember(repository, context) {
+    // Helper function to save a play log session (no-op when no session is active)
+    val savePlayLog: (AdPlaySession?) -> Unit = remember(repository, context) {
         { session ->
-            if (!session.logSaved) {
+            if (session != null && !session.logSaved) {
                 session.logSaved = true
                 val duration = System.currentTimeMillis() - session.startTime
                 val log = AdDisplayLog(
@@ -128,21 +147,43 @@ fun AdScreen(
     // Track screen exit (compositions disposal)
     DisposableEffect(playSession) {
         onDispose {
-            if (!playSession.logSaved) {
+            if (playSession != null && !playSession.logSaved) {
                 playSession.exitedScreen = true
                 savePlayLog(playSession)
             }
         }
     }
 
-    val localFile = MediaManager.getLocalFile(context, currentAd)
+    // Interrupt timing flags (high/medium/low) per ORCHESTRATION_PLAN §4.
+    // The items list is already swapped to the trigger head by the caller; these flags
+    // control when a full cycle is considered complete (used for trigger completion).
+    var interruptAfterCurrentItem by remember { mutableStateOf(false) }
+    var interruptAfterLoop by remember { mutableStateOf(false) }
+    LaunchedEffect(pendingInterruptPriority) {
+        when (pendingInterruptPriority) {
+            "medium" -> {
+                interruptAfterCurrentItem = true
+                android.util.Log.d("AdScreen", "Medium interrupt: will cut after current item")
+            }
+            "low" -> {
+                interruptAfterLoop = true
+                android.util.Log.d("AdScreen", "Low interrupt: will cut after current loop")
+            }
+            "high" -> android.util.Log.d("AdScreen", "High interrupt: cutting immediately")
+        }
+    }
 
     val onAdFinished: () -> Unit = {
         android.util.Log.d("AdScreen", "onAdFinished called, advancing from index $currentIndex")
-        if (!playSession.logSaved) {
+        if (playSession != null && !playSession.logSaved) {
             savePlayLog(playSession)
         }
         currentIndex += 1
+        interruptAfterCurrentItem = false
+        if (items.isNotEmpty() && (currentIndex % items.size) == 0) {
+            interruptAfterLoop = false
+            onTriggerLoopComplete?.invoke()
+        }
     }
 
     val density = LocalDensity.current
@@ -154,7 +195,7 @@ fun AdScreen(
     val menuItems = remember {
         listOf(
             MenuItem("Éttermek", Icons.Filled.Restaurant) {
-                if (!playSession.logSaved) {
+                if (playSession != null && !playSession.logSaved) {
                     playSession.exitedScreen = true
                     savePlayLog(playSession)
                 }
@@ -162,7 +203,7 @@ fun AdScreen(
                 onBackToHome()
             },
             MenuItem("Szállodák", Icons.Filled.Hotel) {
-                if (!playSession.logSaved) {
+                if (playSession != null && !playSession.logSaved) {
                     playSession.exitedScreen = true
                     savePlayLog(playSession)
                 }
@@ -170,7 +211,7 @@ fun AdScreen(
                 onBackToHome()
             },
             MenuItem("Szórakozás", Icons.Filled.TheaterComedy) {
-                if (!playSession.logSaved) {
+                if (playSession != null && !playSession.logSaved) {
                     playSession.exitedScreen = true
                     savePlayLog(playSession)
                 }
@@ -243,43 +284,82 @@ fun AdScreen(
             .background(Color.Black)
             .then(swipeModifier)
             .clickable {
-                if (!playSession.logSaved) {
+                if (playSession != null && !playSession.logSaved) {
                     playSession.clicked = true
                     playSession.exitedScreen = true
                     savePlayLog(playSession)
                 }
-                currentAd.url?.let { onAdClick(it) }
+                (currentItem as? PlaylistItem.Standard)?.adStatus?.url?.let { onAdClick(it) }
             }
     ) {
         // Use currentIndex as part of the key to force re-composition
-        key(currentIndex, currentAd.adId) {
-            when (currentAd.mediaType?.lowercase()) {
-                "video" -> {
-                    VideoContent(
-                        videoFile = localFile,
+        key(currentIndex, currentAd?.adId) {
+            when (val item = currentItem) {
+                is PlaylistItem.Standard -> {
+                    val ad = item.adStatus
+                    val file = MediaManager.getLocalFile(context, ad)
+                    when (ad.mediaType?.lowercase()) {
+                        "video" -> {
+                            VideoContent(
+                                videoFile = file,
+                                playbackId = currentIndex,
+                                onFinished = onAdFinished
+                            )
+                        }
+                        "image" -> {
+                            ImageContent(
+                                imageFile = file,
+                                displayTimeSeconds = effectiveDisplayTime,
+                                onFinished = onAdFinished
+                            )
+                        }
+                        "html" -> {
+                            HtmlContent(
+                                url = ad.url ?: "",
+                                displayTimeSeconds = effectiveDisplayTime,
+                                onFinished = onAdFinished
+                            )
+                        }
+                        "ssp" -> {
+                            SspContent(
+                                playbackId = currentIndex,
+                                onFinished = onAdFinished,
+                                onAdClick = onAdClick
+                            )
+                        }
+                        else -> {
+                            android.util.Log.e("AdScreen", "Unknown mediaType '${ad.mediaType}' for ad ${ad.adId}, skipping...")
+                            LaunchedEffect(ad.adId) {
+                                onAdFinished()
+                            }
+                        }
+                    }
+                }
+                is PlaylistItem.VirtualSsp -> {
+                    SspContent(
                         playbackId = currentIndex,
-                        onFinished = onAdFinished
+                        onFinished = onAdFinished,
+                        onAdClick = onAdClick,
+                        durationBudgetMs = item.durationBudget * 1000L,
+                        fallbackFile = item.fallbackFile
                     )
                 }
-                "image" -> {
-                    ImageContent(
-                        imageFile = localFile,
-                        displayTimeSeconds = currentAd.displayTime ?: 10,
-                        onFinished = onAdFinished
+                is PlaylistItem.GroupSspSlot -> {
+                    SspContent(
+                        playbackId = currentIndex,
+                        onFinished = onAdFinished,
+                        onAdClick = onAdClick,
+                        durationBudgetMs = 0L,
+                        fallbackFile = item.fallbackFile
                     )
                 }
-                "html" -> {
-                    HtmlContent(
-                        url = currentAd.url ?: "",
-                        displayTimeSeconds = currentAd.displayTime ?: 10,
+                PlaylistItem.Logo -> {
+                    LogoContent(
                         onFinished = onAdFinished
                     )
                 }
                 else -> {
-                    android.util.Log.e("AdScreen", "Unknown mediaType '${currentAd.mediaType}' for ad ${currentAd.adId}, skipping...")
-                    LaunchedEffect(currentAd.adId) {
-                        onAdFinished()
-                    }
+                    // currentItem is null (guarded earlier) — no-op to satisfy exhaustiveness
                 }
             }
         }
@@ -295,8 +375,10 @@ fun AdScreen(
                         android.util.Log.d("AdScreen", "Audience Analysis update: $stateStr")
                     }
                     // Capture demographics inside active playSession
-                    playSession.audienceAge = result.age?.toString() ?: playSession.audienceAge
-                    playSession.audienceGender = result.gender ?: playSession.audienceGender
+                    if (playSession != null) {
+                        playSession.audienceAge = result.age?.toString() ?: playSession.audienceAge
+                        playSession.audienceGender = result.gender ?: playSession.audienceGender
+                    }
                 } else {
                     if (faceState != "No face detected") {
                         faceState = "No face detected"
@@ -406,57 +488,58 @@ fun AdScreen(
                     val item = menuItems[itemIndex]
                     val isItemVisible = visibleItemsCount > itemIndex
 
-                    AnimatedVisibility(
-                        visible = isItemVisible,
-                        enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
-                        exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
+                    Box(
+                        modifier = Modifier
+                            .height(60.dp)
+                            .width(220.dp),
+                        contentAlignment = Alignment.CenterStart
                     ) {
-                        val isCenter = isInitialScrollCompleted && isMenuExpansionUnlocked && (index == centerIndex)
-                        val boxWidth by animateDpAsState(
-                            targetValue = if (isCenter) 200.dp else 60.dp,
-                            animationSpec = spring(
-                                dampingRatio = Spring.DampingRatioLowBouncy,
-                                stiffness = Spring.StiffnessLow
-                            ),
-                            label = "boxWidth"
-                        )
-
-                        Box(
-                            modifier = Modifier
-                                .width(boxWidth)
-                                .height(60.dp)
-                                .background(Color.Black, shape = RoundedCornerShape(12.dp))
-                                .border(2.dp, Color.White, shape = RoundedCornerShape(12.dp))
-                                .clickable { item.onClick() },
-                            contentAlignment = Alignment.CenterStart
+                        AnimatedVisibility(
+                            visible = isItemVisible,
+                            enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
+                            exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
                         ) {
-                            // Static square container on the left for the icon
-                            Box(
-                                modifier = Modifier.size(56.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = item.icon,
-                                    contentDescription = item.text,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
+                            val isCenter = isInitialScrollCompleted && isMenuExpansionUnlocked && (index == centerIndex)
+                            val boxWidth by animateDpAsState(
+                                targetValue = if (isCenter) 200.dp else 60.dp,
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioLowBouncy,
+                                    stiffness = Spring.StiffnessLow
+                                ),
+                                label = "boxWidth"
+                            )
 
-                            // Text displayed only when expanded
-                            if (isCenter && boxWidth > 100.dp) {
-                                Row(
-                                    modifier = Modifier
-                                        .padding(start = 56.dp, end = 20.dp)
-                                        .fillMaxHeight(),
-                                    verticalAlignment = Alignment.CenterVertically
+                            Row(
+                                modifier = Modifier
+                                    .width(boxWidth)
+                                    .height(60.dp)
+                                    .background(Color.Black, shape = RoundedCornerShape(12.dp))
+                                    .border(2.dp, Color.White, shape = RoundedCornerShape(12.dp))
+                                    .clickable { item.onClick() },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Static square container on the left for the icon
+                                Box(
+                                    modifier = Modifier.size(56.dp),
+                                    contentAlignment = Alignment.Center
                                 ) {
+                                    Icon(
+                                        imageVector = item.icon,
+                                        contentDescription = item.text,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+
+                                // Text displayed only when expanded
+                                if (isCenter && boxWidth > 100.dp) {
                                     Text(
                                         text = item.text,
                                         color = Color.White,
                                         style = MaterialTheme.typography.titleMedium,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(end = 20.dp)
                                     )
                                 }
                             }
@@ -483,6 +566,46 @@ private class AdPlaySession(
     var logSaved: Boolean = false
     var audienceAge: String? = null
     var audienceGender: String? = null
+}
+
+private fun describeItem(item: PlaylistItem): String = when (item) {
+    is PlaylistItem.Standard -> "Standard(adId=${item.adStatus.adId}, mediaType='${item.adStatus.mediaType}', path=${item.adStatus.path}, durationOverride=${item.durationOverride})"
+    is PlaylistItem.VirtualSsp -> "VirtualSsp(adStatusId=${item.adStatusId}, durationBudget=${item.durationBudget})"
+    is PlaylistItem.GroupSspSlot -> "GroupSspSlot(connectivityId=${item.connectivity.id})"
+    PlaylistItem.Logo -> "Logo"
+}
+
+@Composable
+fun LogoContent(
+    onFinished: () -> Unit,
+    displayTimeSeconds: Int = 10,
+    modifier: Modifier = Modifier
+) {
+    LaunchedEffect(Unit) {
+        delay(displayTimeSeconds * 1000L)
+        onFinished()
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.DarkGray),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "LOGO",
+                style = MaterialTheme.typography.displayMedium,
+                color = Color.White
+            )
+            Text(
+                text = "Signage fallback",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.6f),
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
 }
 
 @Composable
@@ -565,7 +688,9 @@ fun VideoContent(
     videoFile: File,
     playbackId: Int,
     onFinished: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onProgress: ((Float) -> Unit)? = null,
+    maxDurationMs: Long? = null
 ) {
     val context = LocalContext.current
 
@@ -619,6 +744,29 @@ fun VideoContent(
         }
     }
 
+    // Poll playback position (used for VAST quartile tracking)
+    LaunchedEffect(playbackId, onProgress) {
+        if (onProgress == null) return@LaunchedEffect
+        while (true) {
+            val duration = exoPlayer.duration
+            if (duration > 0) {
+                onProgress((exoPlayer.currentPosition.toFloat() / duration).coerceIn(0f, 1f))
+            }
+            delay(500)
+        }
+    }
+
+    // Optional hard cap (used for fallback media filling a fixed slot remainder)
+    LaunchedEffect(playbackId, maxDurationMs) {
+        val cap = maxDurationMs ?: return@LaunchedEffect
+        delay(cap)
+        if (!hasFinished) {
+            hasFinished = true
+            exoPlayer.pause()
+            onFinished()
+        }
+    }
+
     // Use TextureView directly instead of PlayerView with SurfaceView
     // TextureView works better with Compose's view hierarchy and doesn't have Z-ordering issues
     AndroidView(
@@ -634,4 +782,231 @@ fun VideoContent(
             exoPlayer.clearVideoTextureView(textureView)
         }
     )
+}
+
+@Composable
+fun SspContent(
+    playbackId: Int,
+    onFinished: () -> Unit,
+    onAdClick: (String) -> Unit,
+    durationBudgetMs: Long = 0L,   // 0 = unlimited (pure group SSP)
+    fallbackFile: File? = null
+) {
+    val context = LocalContext.current
+    val repository = remember(context) { AdRepository(context) }
+    val scope = rememberCoroutineScope()
+
+    var isLoading by remember(playbackId) { mutableStateOf(true) }
+    var queue by remember(playbackId) { mutableStateOf<List<CachedSspAd>>(emptyList()) }
+    var queueIndex by remember(playbackId) { mutableIntStateOf(0) }
+    var elapsedMs by remember(playbackId) { mutableLongStateOf(0L) }
+    var playedAds by remember(playbackId) { mutableIntStateOf(0) }
+    var fallbackShown by remember(playbackId) { mutableStateOf(false) }
+    var ended by remember(playbackId) { mutableStateOf(false) }
+
+    // Build the play queue once: valid, existing, deduped cached ads in LRU order.
+    LaunchedEffect(playbackId) {
+        SspCacheManager.evictExpiredAndLru(context)
+        val now = System.currentTimeMillis()
+        queue = repository.configDao.getAllCachedSspAds()
+            .filter { it.expiresAt > now && File(it.localPath).exists() }
+            .distinctBy { it.mediaUrl }
+        android.util.Log.d("AdScreen", "SSP Slot: ${queue.size} cached ad(s) ready (budget=${if (durationBudgetMs > 0) durationBudgetMs else "unlimited"}ms)")
+        isLoading = false
+    }
+
+    if (isLoading) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
+
+    fun endSlot() {
+        if (ended) return
+        ended = true
+        val overrun = if (durationBudgetMs > 0) (elapsedMs - durationBudgetMs).coerceAtLeast(0) else 0L
+        android.util.Log.d("AdScreen", "SSP Slot ended: filled=${elapsedMs}ms budget=${durationBudgetMs}ms overrun=${overrun}ms ads=$playedAds fallback=$fallbackShown")
+        scope.launch {
+            repository.logSspSlot(durationBudgetMs, elapsedMs, overrun, playedAds, fallbackShown)
+        }
+        onFinished()
+    }
+
+    fun remainingMs(): Long {
+        if (durationBudgetMs <= 0) return SSP_FALLBACK_DEFAULT_MS
+        return (durationBudgetMs - elapsedMs).coerceAtLeast(1)
+    }
+
+    fun onAdCompleted(actualMs: Long) {
+        elapsedMs += actualMs
+        playedAds++
+        if (durationBudgetMs > 0 && elapsedMs >= durationBudgetMs) {
+            endSlot()
+        } else if (queueIndex + 1 < queue.size) {
+            queueIndex++
+        } else if (fallbackFile != null && !fallbackShown) {
+            // Exhaust the queue so currentAd becomes null and the fallback branch renders.
+            queueIndex = queue.size
+            fallbackShown = true
+        } else {
+            endSlot()
+        }
+    }
+
+    val currentAd = queue.getOrNull(queueIndex)
+    if (ended) return
+
+    when {
+        currentAd != null -> {
+            key(queueIndex) {
+                SspCachedAdView(
+                    playbackId = playbackId + queueIndex,
+                    ad = currentAd,
+                    onAdClick = onAdClick,
+                    onCompleted = { actualMs -> onAdCompleted(actualMs) }
+                )
+            }
+        }
+        fallbackFile != null && !fallbackShown -> {
+            key("fallback") {
+                SspFallbackView(
+                    playbackId = playbackId,
+                    fallbackFile = fallbackFile,
+                    durationMs = remainingMs(),
+                    onCompleted = {
+                        elapsedMs += remainingMs()
+                        endSlot()
+                    }
+                )
+            }
+        }
+        else -> {
+            // Nothing to display (no cached ad, no fallback) -> end the slot.
+            LaunchedEffect(Unit) { endSlot() }
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black))
+        }
+    }
+}
+
+private const val SSP_FALLBACK_DEFAULT_MS = 10_000L
+
+/**
+ * Displays one cached SSP creative and fires its tracking beacons
+ * (impressions, creativeView, start, quartiles, complete).
+ */
+@Composable
+private fun SspCachedAdView(
+    playbackId: Int,
+    ad: CachedSspAd,
+    onAdClick: (String) -> Unit,
+    onCompleted: (Long) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val file = File(ad.localPath)
+    val metadata = remember(ad.mediaUrl) { SspCacheManager.getSspMetadata(context, ad.mediaUrl) }
+    val firedEvents = remember(ad.mediaUrl) { mutableSetOf<String>() }
+
+    fun fireTracking(event: String) {
+        val url = metadata?.trackingUrls?.get(event) ?: return
+        if (!firedEvents.add(event)) return
+        scope.launch(Dispatchers.IO) {
+            SspCacheManager.fireImpressionBeacons(context, listOf(url))
+        }
+    }
+
+    fun fireTrackingProgress(fraction: Float) {
+        if (fraction >= 0.25f) fireTracking("firstQuartile")
+        if (fraction >= 0.50f) fireTracking("midpoint")
+        if (fraction >= 0.75f) fireTracking("thirdQuartile")
+    }
+
+    LaunchedEffect(ad.mediaUrl) {
+        metadata?.impressionUrls?.let { urls ->
+            scope.launch(Dispatchers.IO) {
+                SspCacheManager.fireImpressionBeacons(context, urls)
+            }
+        }
+        fireTracking("creativeView")
+        fireTracking("start")
+    }
+
+    val displaySeconds = (ad.durationSeconds.takeIf { it > 0 } ?: metadata?.durationSeconds ?: 10).coerceAtLeast(1)
+    val handleFinished = {
+        fireTracking("complete")
+        onCompleted(displaySeconds * 1000L)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable {
+                metadata?.redirectUrl?.let { redirect ->
+                    metadata.clickTrackingUrls.let { clickUrls ->
+                        scope.launch(Dispatchers.IO) {
+                            SspCacheManager.fireImpressionBeacons(context, clickUrls)
+                        }
+                    }
+                    onAdClick(redirect)
+                }
+            }
+    ) {
+        when (ad.mediaType.lowercase()) {
+            "video" -> {
+                VideoContent(
+                    videoFile = file,
+                    playbackId = playbackId,
+                    onFinished = handleFinished,
+                    onProgress = { fraction -> fireTrackingProgress(fraction) }
+                )
+            }
+            "image" -> {
+                val stepMs = displaySeconds * 1000L / 4
+                LaunchedEffect(ad.mediaUrl, displaySeconds) {
+                    repeat(3) {
+                        delay(stepMs)
+                        fireTrackingProgress((it + 1) / 4f)
+                    }
+                }
+                ImageContent(
+                    imageFile = file,
+                    displayTimeSeconds = displaySeconds,
+                    onFinished = handleFinished
+                )
+            }
+            else -> {
+                LaunchedEffect(Unit) { handleFinished() }
+            }
+        }
+    }
+}
+
+/**
+ * Displays the group's fallback media to fill the remaining SSP slot budget.
+ */
+@Composable
+private fun SspFallbackView(
+    playbackId: Int,
+    fallbackFile: File,
+    durationMs: Long,
+    onCompleted: () -> Unit
+) {
+    android.util.Log.d("AdScreen", "SSP Slot: using fallback media ${fallbackFile.name} for ${durationMs}ms")
+    val isVideo = fallbackFile.name.substringAfterLast('.', "").lowercase() in setOf("mp4", "mkv", "webm", "avi")
+    val displaySeconds = (durationMs / 1000L).coerceAtLeast(1)
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        if (isVideo) {
+            VideoContent(
+                videoFile = fallbackFile,
+                playbackId = playbackId,
+                onFinished = onCompleted,
+                maxDurationMs = durationMs
+            )
+        } else {
+            ImageContent(
+                imageFile = fallbackFile,
+                displayTimeSeconds = displaySeconds.toInt(),
+                onFinished = onCompleted
+            )
+        }
+    }
 }

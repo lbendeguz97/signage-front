@@ -5,8 +5,10 @@ package com.example.signage_front.network
 import android.content.Context
 import android.util.Log
 import com.example.signage_front.data.AdRepository
+import com.example.signage_front.data.ContentOrchestrator
 import com.example.signage_front.data.AdStatus
 import com.example.signage_front.data.AdDisplayLog
+import com.example.signage_front.data.PendingBeacon
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,8 +28,10 @@ import java.io.File
 object AdScheduler {
     private const val TAG = "AdScheduler"
     private const val CONFIG_FILE = "app_config.json"
+    private const val SSP_REFRESH_MS = 2 * 60 * 1000L // force a refetch every 2 min so mock playlist changes propagate
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isPolling = false
+    private var lastSspPrefetchAt = 0L
 
     /**
      * Starts polling. It checks the database status first and syncs only if needed.
@@ -42,6 +46,8 @@ object AdScheduler {
             while (isActive) {
                 try {
                     checkAndSync(context)
+                    flushPendingBeacons(context)
+                    preFetchSspAdsIfNeeded(context)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in polling loop", e)
                 }
@@ -61,9 +67,11 @@ object AdScheduler {
         val repository = AdRepository(context)
 
         var adRegistryChanged = false
-        var othersChanged = false
+        var groupPolicyChanged = false
+        var sspConnectivityChanged = false
+        
         val pendingTokens = mutableMapOf<String, String>()
-        val otherTableNames = mutableListOf<String>()
+        val groupPolicyTableNames = mutableListOf<String>()
 
         for (i in 0 until statusArray.length()) {
             val obj = statusArray.getJSONObject(i)
@@ -75,29 +83,43 @@ object AdScheduler {
             if (localState == null || localState.timestamp != serverToken) {
                 Log.d(TAG, "Change detected in $tableName. Server: $serverToken, Local: ${localState?.timestamp ?: "None"}")
                 pendingTokens[tableName] = serverToken
-                if (tableName == "ad_registry") {
-                    adRegistryChanged = true
-                } else {
-                    othersChanged = true
-                    otherTableNames.add(tableName)
+                when (tableName) {
+                    "ad_registry" -> adRegistryChanged = true
+                    "ssp_connectivities" -> sspConnectivityChanged = true
+                    else -> {
+                        groupPolicyChanged = true
+                        groupPolicyTableNames.add(tableName)
+                    }
                 }
             }
         }
 
-        // 1. Sync Config if any "other" table changed
-        if (othersChanged) {
+        // 1. Sync Config if any group policy table changed
+        if (groupPolicyChanged) {
             Log.d(TAG, "Syncing app configuration...")
             if (fetchAndSyncConfig(context)) {
-                otherTableNames.forEach { table ->
+                groupPolicyTableNames.forEach { table ->
                     pendingTokens[table]?.let { token ->
                         repository.updateSyncState(table, token)
                     }
                 }
                 Log.d(TAG, "Config sync successful.")
+                ContentOrchestrator.onConfigSynced(context)
             }
         }
 
-        // 2. Sync Ad Registry (metadata + media)
+        // 2. Sync SSP Connectivities
+        if (sspConnectivityChanged) {
+            Log.d(TAG, "Syncing SSP connectivities...")
+            if (fetchAndSyncSspConnectivity(context)) {
+                pendingTokens["ssp_connectivities"]?.let { token ->
+                    repository.updateSyncState("ssp_connectivities", token)
+                }
+                Log.d(TAG, "SSP connectivities sync successful.")
+            }
+        }
+
+        // 3. Sync Ad Registry (metadata + media)
         // We sync if the server registry changed OR if we have local ads that failed to sync previously
         val localAds = repository.adDao.getAllAdsList()
         val hasIncompleteAds = localAds.any { it.syncStatus != "VERIFIED" }
@@ -151,11 +173,35 @@ object AdScheduler {
                     val configJson = response.body?.string() ?: return false
                     val configFile = File(context.filesDir, CONFIG_FILE)
                     configFile.writeText(configJson)
-                    true
+                    
+                    val repository = AdRepository(context)
+                    repository.syncConfig(configJson)
                 } else false
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch config", e)
+            false
+        }
+    }
+
+    private suspend fun fetchAndSyncSspConnectivity(context: Context): Boolean {
+        if (!SecurityManager.hasValidKey()) return false
+        val client = NetworkClientProvider.getMTlsClient(context)
+        val request = Request.Builder()
+            .url("${Config.currentBaseUrl}/getSspConnectivity")
+            .get()
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val sspJson = response.body?.string() ?: return false
+                    val repository = AdRepository(context)
+                    repository.syncSspConnectivity(sspJson)
+                } else false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch SSP connectivities", e)
             false
         }
     }
@@ -190,6 +236,13 @@ object AdScheduler {
 
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
+
+                // Skip soft-deleted ads
+                if (obj.has("deleted_at") && !obj.isNull("deleted_at")) {
+                    Log.d(TAG, "Skipping soft-deleted ad: id=${obj.optString("ad_id")}")
+                    continue
+                }
+
                 val mediaType = if (obj.has("media_type")) {
                     obj.getString("media_type")
                 } else {
@@ -321,6 +374,91 @@ object AdScheduler {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error uploading logs to server", e)
+        }
+    }
+
+    suspend fun flushPendingBeacons(context: Context) {
+        val repository = AdRepository(context)
+        val beacons = repository.configDao.getAllPendingBeacons()
+        if (beacons.isEmpty()) return
+
+        Log.d(TAG, "Attempting to flush ${beacons.size} pending tracking beacons...")
+        val client = NetworkClientProvider.getMTlsClient(context)
+
+        beacons.forEach { beacon ->
+            val request = Request.Builder()
+                .url(beacon.url)
+                .get()
+                .build()
+
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        repository.configDao.deletePendingBeacon(beacon.id)
+                        Log.d(TAG, "Successfully flushed beacon: ${beacon.url}")
+                    } else {
+                        handleBeaconFailure(repository, beacon)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to flush beacon: ${beacon.url}", e)
+                handleBeaconFailure(repository, beacon)
+            }
+        }
+    }
+
+    private suspend fun handleBeaconFailure(repository: AdRepository, beacon: PendingBeacon) {
+        if (beacon.retryCount >= 10) {
+            repository.configDao.deletePendingBeacon(beacon.id)
+            Log.w(TAG, "Dropped dead beacon after 10 retries: ${beacon.url}")
+        } else {
+            repository.configDao.incrementRetryCount(beacon.id)
+        }
+    }
+
+    suspend fun preFetchSspAdsIfNeeded(context: Context) {
+        val repository = AdRepository(context)
+
+        val now = System.currentTimeMillis()
+        val cachedAds = repository.configDao.getAllCachedSspAds().filter { it.expiresAt > now }
+
+        // Skip the short-circuit below so mock playlist/creative changes are
+        // picked up within a few minutes even while the cache is still "full".
+        // Refetching the same rotation returns the same mediaUrls, which are
+        // deduped by CachedSspAd's primary key, so the cache never grows unbounded.
+        val forceRefresh = now - lastSspPrefetchAt >= SSP_REFRESH_MS
+
+        // 1. Normal path: only prefetch when we have fewer than 3 valid cached ads
+        if (cachedAds.size >= 3 && !forceRefresh) {
+            return
+        }
+        lastSspPrefetchAt = now
+
+        // 2. Read Group Configuration to see if we have an active sspConnectivityId
+        val groupConfig = repository.configDao.getGroupConfig() ?: return
+        val sspConnectivityId = groupConfig.sspConnectivityId ?: return
+
+        // 3. Read SSP Connectivity parameters
+        val sspConnectivity = repository.configDao.getSspConnectivity(sspConnectivityId) ?: return
+
+        // 4. Read Tablet Metadata
+        val androidId = android.provider.Settings.Secure.getString(
+            context.contentResolver, android.provider.Settings.Secure.ANDROID_ID
+        ) ?: "unknown"
+        val tabletMetadata = repository.configDao.getTabletMetadata(androidId)
+        val refId = tabletMetadata?.refId ?: sspConnectivity.refId
+
+        Log.d(TAG, "Pre-fetching programmatic ad from SSP: ${sspConnectivity.endpointUrl} (uuid=$refId)...")
+
+        val success = SspCacheManager.fetchAndCacheAd(
+            context = context,
+            connectivity = sspConnectivity,
+            tabletRefId = refId
+        )
+        if (success) {
+            Log.d(TAG, "Successfully pre-fetched programmatic ad.")
+        } else {
+            Log.w(TAG, "Failed to pre-fetch programmatic ad from SSP.")
         }
     }
 }

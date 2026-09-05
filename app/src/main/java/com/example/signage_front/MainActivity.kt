@@ -38,6 +38,12 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.signage_front.data.AdRepository
+import com.example.signage_front.data.AdStatus
+import com.example.signage_front.data.ContentOrchestrator
+import com.example.signage_front.data.GroupConfig
+import com.example.signage_front.data.PlaylistItem
+import com.example.signage_front.data.PlaylistBuilder
+import com.example.signage_front.data.ResolvedContent
 import com.example.signage_front.network.AdScheduler
 import com.example.signage_front.network.Config
 import com.example.signage_front.network.MediaManager
@@ -54,6 +60,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.File
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import android.content.RestrictionsManager
@@ -83,6 +90,8 @@ class MainActivity : ComponentActivity() {
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         val repository = AdRepository(applicationContext)
+
+        ContentOrchestrator.start(applicationContext)
 
         setContent {
             val navController = rememberNavController()
@@ -205,17 +214,59 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("ad") {
                             val verifiedAds = ads.filter { it.adAllowed && it.syncStatus == "VERIFIED" }
-                            
-                            LaunchedEffect(verifiedAds.isEmpty()) {
-                                if (verifiedAds.isEmpty() && isEnrolled) {
-                                    Log.d(TAG, "No verified ads found, triggering on-demand sync.")
+                            val groupConfig by repository.configDao.getGroupConfigFlow().collectAsState(initial = null)
+                            val orchState by ContentOrchestrator.state.collectAsState()
+
+                            val activeTrigger = orchState.triggerQueue.firstOrNull()
+                            val base = orchState.base
+
+                            // Which playlist feeds the current ad list (null for media trigger / group SSP / logo)
+                            val activePlaylistId = when {
+                                activeTrigger != null && activeTrigger.actionType == "playlist" -> activeTrigger.actionId
+                                activeTrigger == null -> (base as? ResolvedContent.PlaylistContent)?.playlistId
+                                else -> null
+                            }
+                            val playlistAds by repository.configDao.getPlaylistAdsFlow(activePlaylistId ?: -1L)
+                                .collectAsState(initial = emptyList())
+
+                            // Ordered list of PlaylistItems for the resolved content source (trigger or base).
+                            var playlistItems by remember { mutableStateOf<List<PlaylistItem>>(emptyList()) }
+                            LaunchedEffect(orchState, playlistAds, verifiedAds, groupConfig?.sspConnectivityId) {
+                                val sspConnectivity = groupConfig?.sspConnectivityId?.let {
+                                    repository.configDao.getSspConnectivity(it)
+                                }
+                                val fallbackFile = resolveFallbackFile(applicationContext, groupConfig, verifiedAds)
+                                val trigger = orchState.triggerQueue.firstOrNull()
+                                playlistItems = when {
+                                    trigger != null -> when (trigger.actionType) {
+                                        "media" -> verifiedAds.firstOrNull { it.adId == trigger.actionId.toString() }
+                                            ?.let { listOf(PlaylistItem.Standard(it, null)) } ?: emptyList()
+                                        else -> PlaylistBuilder.buildPlaylistItems(playlistAds, verifiedAds, sspConnectivity, fallbackFile)
+                                    }
+                                    else -> when (val b = orchState.base) {
+                                        is ResolvedContent.PlaylistContent ->
+                                            PlaylistBuilder.buildPlaylistItems(playlistAds, verifiedAds, sspConnectivity, fallbackFile)
+                                        is ResolvedContent.GroupSsp -> listOf(PlaylistItem.GroupSspSlot(b.connectivity, fallbackFile))
+                                        ResolvedContent.Logo -> listOf(PlaylistItem.Logo)
+                                    }
+                                }
+                            }
+
+                            LaunchedEffect(playlistItems.isEmpty()) {
+                                if (playlistItems.isEmpty() && isEnrolled) {
+                                    Log.d(TAG, "No playable items found, triggering on-demand sync.")
                                     AdScheduler.fetchAndSyncAdStatus(applicationContext)
                                 }
                             }
 
-                            if (verifiedAds.isNotEmpty()) {
+                            if (playlistItems.isNotEmpty()) {
                                 AdScreen(
-                                    ads = verifiedAds,
+                                    items = playlistItems,
+                                    pendingInterruptPriority = orchState.pendingInterrupt?.priority,
+                                    onTriggerLoopComplete = {
+                                        val t = orchState.triggerQueue.firstOrNull()
+                                        if (t != null) ContentOrchestrator.onTriggerComplete(t.triggerId)
+                                    },
                                     onAdClick = { redirectUrl ->
                                         val fullQrUrl = Config.REDIRECT_ROOT.toHttpUrlOrNull()?.newBuilder()
                                             ?.addQueryParameter("url", redirectUrl)
@@ -497,5 +548,28 @@ class MainActivity : ComponentActivity() {
             Log.e(TAG, "Error reading application restrictions: ${e.message}", e)
         }
         return null
+    }
+}
+
+/**
+ * Resolves the group's fallback media (configJson.fallback_media_id) to a local
+ * file, used to fill SSP/idle slot time when no programmatic ad is cached.
+ */
+private fun resolveFallbackFile(
+    context: Context,
+    groupConfig: GroupConfig?,
+    verifiedAds: List<AdStatus>
+): File? {
+    if (groupConfig == null) return null
+    return try {
+        val fallbackId = JSONObject(groupConfig.configJson)
+            .optString("fallback_media_id", "")
+            .takeIf { it.isNotBlank() } ?: return null
+        val ad = verifiedAds.firstOrNull { it.adId == fallbackId } ?: return null
+        val file = MediaManager.getLocalFile(context, ad)
+        if (file.exists()) file else null
+    } catch (e: Exception) {
+        Log.e("MainActivity", "Failed to resolve fallback media", e)
+        null
     }
 }

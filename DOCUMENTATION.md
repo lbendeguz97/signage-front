@@ -1,7 +1,7 @@
 # Signage Front - Project Documentation
 
 ## Project Overview
-**Signage Front** is a secure, kiosk-mode Android digital signage application built with Jetpack Compose. It supports automated device enrollment via mTLS, dynamic ad synchronization (HTML and Video), and advanced system controls like automated screen wake-up.
+**Signage Front** is a secure, kiosk-mode Android digital signage application built with Jetpack Compose. It supports automated device enrollment via mTLS, dynamic ad synchronization (HTML, Video, and programmatic SSP slots), and advanced system controls like automated screen wake-up.
 
 ---
 
@@ -24,7 +24,7 @@ The app uses Mutual TLS for all sensitive communication.
 
 ### Enrollment Flow
 1. **Key Generation**: 2048-bit RSA KeyPair generated in KeyStore.
-2. **CSR Generation**: PKCS#10 Certificate Signing Request created using Bouncy Castle, using `Build.SERIAL` as Common Name (CN).
+2. **CSR Generation**: Create PKCS#10 Certificate Signing Request using Bouncy Castle, using `Build.SERIAL` as Common Name (CN).
 3. **Registration**: CSR and OTP are sent via `POST /enroll`.
 4. **Certificate Storage**: Signed X.509 certificate received from server is stored in KeyStore using `setKeyEntry` to maintain the chain without orphaning the private key.
 
@@ -41,16 +41,17 @@ On startup, the app performs a connectivity check (`/echo`) across primary and b
 
 ### Room Database
 Located in `com.example.signage_front.data`.
-- **Entity (`AdStatus`)**: Stores ad metadata (ID, allowed status, path, display settings, checksum, and sync status).
-- **Entity (`SyncState`)**: Tracks synchronization timestamps to optimize server delta queries.
-- **Sync Mechanism**: A Transaction-based sync ensures the local DB is a mirror of the server. It inserts/updates new records and deletes orphaned records in one atomic step.
-
-### Ad Repository (Manager Middleware)
-Orchestrates the lifecycle of data:
-1. Updates Database records.
-2. Triggers file downloads for new content via `MediaManager`.
-3. Verifies file integrity.
-4. Cleans up unused media files from storage.
+* **Database Version**: `11` (with destructive migration support).
+* **Entities**:
+  - `AdStatus`: Stores ad metadata (ID, allowed status, path, display settings, checksum, and sync status).
+  - `SyncState`: Tracks synchronization timestamps to optimize server delta queries.
+  - `GroupConfig`: Stores group config attributes including the active `sspConnectivityId`.
+  - `TabletMetadata`: Caches local device metadata (`androidId` and `refId`).
+  - `SspConnectivity`: Caches programmatic partner details (name, provider, endpoint URL, deal ID, line item ID, additional parameters).
+  - `CachedSspAd`: Tracks pre-fetched SSP media files locally, storing `mediaUrl`, `localPath`, `expiresAt` (TTL), and `lastAccessed`.
+  - `PendingBeacon`: Queues offline impression and click beacons (`url`, `createdAt`, `retryCount`).
+* **Sync Mechanism**: A Transaction-based sync ensures the local DB is a mirror of the server. It inserts/updates new records and deletes orphaned records in one atomic step. 
+* **Thread Safety**: Wrapped repository write transactions with `Mutex` locks to prevent concurrent database writes or overlapping file downloads.
 
 ---
 
@@ -61,27 +62,32 @@ Handles the local filesystem (`filesDir/media/`).
 - **Subdirectories**: Categorizes media into `video/`, `image/`, and `html/`.
 - **Integrity Check**:
     - **Cheap Check**: Verification of file size against server metadata.
-    - **Deep Check**: SHA-256 Checksum verification to prevent corruption or tampering.
+    - **Deep Check**: SHA-1 Checksum verification to prevent corruption or tampering.
 - **Sync Status**: Files transition from `PENDING` -> `DOWNLOADING` -> `VERIFIED`. Only `VERIFIED` content is displayed.
 
+### SSP Cache Manager (`SspCacheManager`)
+Handles local file caching and eviction for programmatic advertisements:
+- **Max Cache Footprint**: Capped at **200 MB**.
+- **Eviction Policies**: Employs TTL-based pruning (deleting expired ads) followed by LRU eviction (deleting oldest files based on `lastAccessed`) to enforce limits.
+- **Beacon Tracker**: Launches GET request loops to fire tracking beacons, queueing failed calls in `pending_beacons` on offline states.
+
 ### Ad Scheduler
-- **Polling**: Background loop runs every 5 minutes.
+- **Polling**: Background loop runs every 1 minute.
 - **Immediate Sync**: Triggered instantly after successful mTLS check-in.
+- **Programmatic Routines**: Periodically pre-fetches up to 3 programmatic ads and flushes pending offline impression tracking beacons.
 
 ---
 
 ## 5. Frontend (UI Layer)
 
 ### Jetpack Compose Components
-- **`AdScreen`**: High-performance display using `Media3 ExoPlayer` (for video) and `Multiplatform WebView` (for HTML).
+- **`AdScreen`**: High-performance display using `Media3 ExoPlayer` (for video), `Multiplatform WebView` (for HTML), and `SspContent` (for programmatic ads).
+    - *SSP rendering*: Inspects cache, plays video/image, fires beacons, triggers redirects, and falls back to skipping the slot if cache is empty.
     - *Kiosk Mode*: No playback controls or buttons are visible.
 - **`HomeScreen`**: Interactive hub for user selection.
 - **`EnrollmentScreen`**: UI for device registration with OTP input.
 - **`QrCodeScreen`**: Displays a QR code generated from a redirect URL.
 - **`DebugScreen`**: Available only in `dev` environment to assist with connectivity issues.
-
-### Interaction Flow
-- Clicking an active Ad generates a QR code. The URL is constructed using `REDIRECT_ROOT` (defined in `Config.kt`) as a prefix for tracking and analytics.
 
 ---
 
@@ -97,11 +103,11 @@ Handles the local filesystem (`filesDir/media/`).
 ---
 
 ## 7. Configuration
-Centrally managed in `com.example.signage_front.network.Config`.
+Centrally managed in Central Configuration [`Config.kt`](file:///home/lbendeguz97/git/signage-full/signage-front/app/src/main/java/com/example/signage_front/network/Config.kt).
 - **`ENV`**: Toggles between `dev` (shows debug screens) and `prod`.
 - **`BASE_URL` / `BASE_URL_BACKUP`**: Server endpoint configuration.
 - **`REDIRECT_ROOT`**: The base URL for user-facing QR code redirects.
 
 ---
 
-*Last Updated: 2025-05-15*
+*Last Updated: 2026-08-11*
