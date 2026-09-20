@@ -23,9 +23,13 @@ import androidx.room.RoomDatabase
         SspConnectivity::class,
         CachedSspAd::class,
         PendingBeacon::class,
-        SspSlotLog::class
+        SspSlotLog::class,
+        PageCategory::class,
+        Page::class,
+        PageLanguage::class,
+        PageMedia::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -34,6 +38,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun adDisplayLogDao(): AdDisplayLogDao
     abstract fun configDao(): ConfigDao
     abstract fun sspSlotLogDao(): SspSlotLogDao
+    abstract fun pageDao(): PageDao
 
     companion object {
         @Volatile

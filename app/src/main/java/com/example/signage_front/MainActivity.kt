@@ -21,16 +21,24 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -41,6 +49,8 @@ import com.example.signage_front.data.AdRepository
 import com.example.signage_front.data.AdStatus
 import com.example.signage_front.data.ContentOrchestrator
 import com.example.signage_front.data.GroupConfig
+import com.example.signage_front.data.LanguageManager
+import com.example.signage_front.data.MenuCategory
 import com.example.signage_front.data.PlaylistItem
 import com.example.signage_front.data.PlaylistBuilder
 import com.example.signage_front.data.ResolvedContent
@@ -50,9 +60,12 @@ import com.example.signage_front.network.MediaManager
 import com.example.signage_front.network.NetworkClientProvider
 import com.example.signage_front.network.SecurityManager
 import com.example.signage_front.receiver.WakeReceiver
+import com.example.signage_front.ui.composables.RootSidebar
+import com.example.signage_front.ui.composables.SidebarItem
 import com.example.signage_front.ui.screens.*
 import com.example.signage_front.ui.theme.SignagefrontTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -90,6 +103,8 @@ class MainActivity : ComponentActivity() {
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         val repository = AdRepository(applicationContext)
+
+        LanguageManager.init(applicationContext)
 
         ContentOrchestrator.start(applicationContext)
 
@@ -163,6 +178,76 @@ class MainActivity : ComponentActivity() {
             }
 
             SignagefrontTheme {
+                val language by LanguageManager.language.collectAsState()
+                val rootGroupConfig by repository.configDao.getGroupConfigFlow().collectAsState(initial = null)
+                val isInteractive = isInteractiveMode(rootGroupConfig)
+                var showMenu by remember { mutableStateOf(false) }
+                var menuInteractionTime by remember { mutableLongStateOf(0L) }
+
+                val density = LocalDensity.current
+                val edgeThresholdPx = remember(density) { with(density) { 60.dp.toPx() } }
+                val dragThresholdPx = remember(density) { with(density) { 50.dp.toPx() } }
+
+                // Auto-hide the sidebar after 10s of no interaction.
+                LaunchedEffect(showMenu, menuInteractionTime) {
+                    if (showMenu) {
+                        delay(10_000L)
+                        showMenu = false
+                    }
+                }
+
+                // Non-interactive ("view only") groups must never expose the sidebar.
+                LaunchedEffect(isInteractive) {
+                    if (!isInteractive) showMenu = false
+                }
+
+                // Left-edge swipe opens the sidebar, but only when the group is interactive.
+                val rootSwipeModifier = if (isInteractive) {
+                    Modifier.pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (down.position.x < edgeThresholdPx) {
+                                var totalDragX = 0f
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id }
+                                    if (change == null || !change.pressed) break
+                                    totalDragX += (change.position.x - change.previousPosition.x)
+                                    if (totalDragX > dragThresholdPx) {
+                                        change.consume()
+                                        showMenu = true
+                                        menuInteractionTime = System.currentTimeMillis()
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Modifier
+                }
+
+                val sidebarItems: List<SidebarItem> = buildList {
+                    MenuCategory.entries.forEach { category ->
+                        add(SidebarItem(category.label(language), category.icon) {
+                            showMenu = false
+                            navController.navigate("category/${category.id}")
+                        })
+                    }
+                    add(SidebarItem(if (language == LanguageManager.EN) "Weather" else "Időjárás", Icons.Filled.WbSunny) {
+                        showMenu = false
+                        navController.navigate("weather")
+                    })
+                    add(SidebarItem(if (language == LanguageManager.EN) "Advertisement" else "Reklám", Icons.Filled.Campaign) {
+                        showMenu = false
+                        navController.navigate("ad")
+                    })
+                    add(SidebarItem(if (language == LanguageManager.EN) "Nyelv: HU" else "Nyelv: EN", Icons.Filled.Language) {
+                        LanguageManager.toggle(applicationContext)
+                    })
+                }
+
+                Box(modifier = Modifier.fillMaxSize().then(rootSwipeModifier)) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     NavHost(
                         navController = navController,
@@ -171,6 +256,24 @@ class MainActivity : ComponentActivity() {
                     ) {
                         composable("home") {
                             HomeScreen(onNavigateToAd = { navController.navigate("ad") })
+                        }
+                        composable(
+                            route = "category/{categoryId}",
+                            arguments = listOf(navArgument("categoryId") { type = NavType.LongType })
+                        ) { backStackEntry ->
+                            val categoryId = backStackEntry.arguments?.getLong("categoryId") ?: 0L
+                            CategoryScreen(
+                                categoryId = categoryId,
+                                onBack = { navController.popBackStack() },
+                                onPageClick = { pageId -> navController.navigate("page/$pageId") }
+                            )
+                        }
+                        composable(
+                            route = "page/{pageId}",
+                            arguments = listOf(navArgument("pageId") { type = NavType.LongType })
+                        ) { backStackEntry ->
+                            val pageId = backStackEntry.arguments?.getLong("pageId") ?: 0L
+                            PageViewScreen(pageId = pageId, onBack = { navController.popBackStack() })
                         }
                         composable("enrollment") {
                             EnrollmentScreen(
@@ -211,6 +314,9 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             )
+                        }
+                        composable("weather") {
+                            WeatherScreen(onBack = { navController.popBackStack() })
                         }
                         composable("ad") {
                             val verifiedAds = ads.filter { it.adAllowed && it.syncStatus == "VERIFIED" }
@@ -324,6 +430,13 @@ class MainActivity : ComponentActivity() {
                             })
                         }
                     }
+                }
+                RootSidebar(
+                    items = sidebarItems,
+                    visible = showMenu && isInteractive,
+                    onScrimClick = { showMenu = false },
+                    onInteraction = { menuInteractionTime = System.currentTimeMillis() }
+                )
                 }
             }
         }
@@ -548,6 +661,22 @@ class MainActivity : ComponentActivity() {
             Log.e(TAG, "Error reading application restrictions: ${e.message}", e)
         }
         return null
+    }
+}
+
+/**
+ * Whether the group's config enables user interaction (sidebar/navigation).
+ * config.mode == "interactive" -> true; anything else ("playlist"/missing) -> false.
+ * Returns true when no config is known yet so the UI isn't locked before first sync.
+ */
+private fun isInteractiveMode(groupConfig: GroupConfig?): Boolean {
+    if (groupConfig == null) return true
+    return try {
+        JSONObject(groupConfig.configJson)
+            .optString("mode", "")
+            .equals("interactive", ignoreCase = true)
+    } catch (e: Exception) {
+        false
     }
 }
 

@@ -26,11 +26,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Restaurant
-import androidx.compose.material.icons.filled.Hotel
-import androidx.compose.material.icons.filled.TheaterComedy
-import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,12 +37,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import com.example.signage_front.R
 import com.example.signage_front.network.SspCacheManager
 import com.example.signage_front.data.CachedSspAd
 import androidx.media3.exoplayer.ExoPlayer
@@ -186,103 +183,11 @@ fun AdScreen(
         }
     }
 
-    val density = LocalDensity.current
-    val edgeThresholdPx = remember(density) { with(density) { 60.dp.toPx() } }
-    val dragThresholdPx = remember(density) { with(density) { 50.dp.toPx() } }
-    var showMenu by remember { mutableStateOf(false) }
-    var menuInteractionTime by remember { mutableLongStateOf(0L) }
-
-    val menuItems = remember {
-        listOf(
-            MenuItem("Éttermek", Icons.Filled.Restaurant) {
-                if (playSession != null && !playSession.logSaved) {
-                    playSession.exitedScreen = true
-                    savePlayLog(playSession)
-                }
-                showMenu = false
-                onBackToHome()
-            },
-            MenuItem("Szállodák", Icons.Filled.Hotel) {
-                if (playSession != null && !playSession.logSaved) {
-                    playSession.exitedScreen = true
-                    savePlayLog(playSession)
-                }
-                showMenu = false
-                onBackToHome()
-            },
-            MenuItem("Szórakozás", Icons.Filled.TheaterComedy) {
-                if (playSession != null && !playSession.logSaved) {
-                    playSession.exitedScreen = true
-                    savePlayLog(playSession)
-                }
-                showMenu = false
-                onBackToHome()
-            },
-            MenuItem("Reklám", Icons.Filled.Campaign) {
-                showMenu = false
-            }
-        )
-    }
-
-    var visibleItemsCount by remember { mutableIntStateOf(0) }
-    var isMenuExpansionUnlocked by remember { mutableStateOf(false) }
-    LaunchedEffect(showMenu) {
-        if (showMenu) {
-            isMenuExpansionUnlocked = false
-            visibleItemsCount = 0
-            for (i in 1..menuItems.size) {
-                delay(120L)
-                visibleItemsCount = i
-            }
-            delay(150L) // Wait for items to fully settle into their spots
-            isMenuExpansionUnlocked = true
-        } else {
-            isMenuExpansionUnlocked = false
-            visibleItemsCount = 0
-        }
-    }
-
-    // Detect drag from left edge to show the menu
-    val swipeModifier = Modifier.pointerInput(Unit) {
-        awaitEachGesture {
-            val down = awaitFirstDown(requireUnconsumed = false)
-            if (down.position.x < edgeThresholdPx) {
-                var totalDragX = 0f
-                while (true) {
-                    val event = awaitPointerEvent()
-                    val change = event.changes.firstOrNull { it.id == down.id }
-                    if (change == null || !change.pressed) {
-                        break
-                    }
-                    val currentX = change.position.x
-                    val previousX = change.previousPosition.x
-                    totalDragX += (currentX - previousX)
-                    
-                    if (totalDragX > dragThresholdPx) {
-                        change.consume()
-                        showMenu = true
-                        menuInteractionTime = System.currentTimeMillis()
-                        break
-                    }
-                }
-            }
-        }
-    }
-
-    // Auto-timeout for the menu overlay after 10 seconds of no interaction
-    LaunchedEffect(showMenu, menuInteractionTime) {
-        if (showMenu) {
-            delay(10000L)
-            showMenu = false
-        }
-    }
-
     // Use a Box with black background to prevent any flicker
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
-            .then(swipeModifier)
             .clickable {
                 if (playSession != null && !playSession.logSaved) {
                     playSession.clicked = true
@@ -391,171 +296,8 @@ fun AdScreen(
                 .align(androidx.compose.ui.Alignment.TopEnd)
                 .padding(16.dp)
         )
-
-        // Transparent scrim overlay behind the menu to dismiss it when clicked outside
-        if (showMenu) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) {
-                        showMenu = false
-                    }
-            )
-        }
-
-        val menuOffset by animateDpAsState(
-            targetValue = if (showMenu) 0.dp else (-220).dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioNoBouncy,
-                stiffness = Spring.StiffnessMedium
-            ),
-            label = "menuOffset"
-        )
-
-        // Floating Sidebar Menu Overlay (No background container or panel behind them)
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(220.dp)
-                .offset(x = menuOffset)
-                .align(Alignment.CenterStart)
-                .pointerInput(Unit) {
-                    // Reset the timeout timer on any touch interaction
-                    awaitPointerEventScope {
-                        while (true) {
-                            awaitPointerEvent()
-                            menuInteractionTime = System.currentTimeMillis()
-                        }
-                    }
-                }
-                .padding(start = 16.dp, top = 16.dp, bottom = 16.dp),
-            contentAlignment = Alignment.CenterStart
-        ) {
-            val maxHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
-            val itemHeightPx = with(LocalDensity.current) { 60.dp.toPx() }
-            // Calculate scroll offset so item centers align with viewport center.
-            val centerScrollOffset = - (maxHeightPx / 2 - itemHeightPx / 2).toInt()
-
-            val centerOffset = 5000 - (5000 % menuItems.size)
-            val lazyListState = rememberLazyListState(
-                initialFirstVisibleItemIndex = centerOffset,
-                initialFirstVisibleItemScrollOffset = centerScrollOffset
-            )
-            val snappingLayout = remember(lazyListState) {
-                SnapLayoutInfoProvider(lazyListState, SnapPosition.Center)
-            }
-            val snapFlingBehavior = rememberSnapFlingBehavior(snappingLayout)
-
-            var isInitialScrollCompleted by remember { mutableStateOf(false) }
-
-            LaunchedEffect(showMenu) {
-                if (showMenu) {
-                    isInitialScrollCompleted = false
-                    lazyListState.scrollToItem(centerOffset, centerScrollOffset)
-                    isInitialScrollCompleted = true
-                } else {
-                    isInitialScrollCompleted = false
-                }
-            }
-
-            val centerIndex by remember {
-                derivedStateOf {
-                    val layoutInfo = lazyListState.layoutInfo
-                    val visibleItems = layoutInfo.visibleItemsInfo
-                    if (visibleItems.isEmpty()) -1
-                    else {
-                        val viewportCenter = (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset) / 2f
-                        visibleItems.minByOrNull { item ->
-                            val itemCenter = item.offset + item.size / 2f
-                            kotlin.math.abs(itemCenter - viewportCenter)
-                        }?.index ?: -1
-                    }
-                }
-            }
-
-            LazyColumn(
-                state = lazyListState,
-                flingBehavior = snapFlingBehavior,
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically),
-                horizontalAlignment = Alignment.Start
-            ) {
-                items(10000) { index ->
-                    val itemIndex = index % menuItems.size
-                    val item = menuItems[itemIndex]
-                    val isItemVisible = visibleItemsCount > itemIndex
-
-                    Box(
-                        modifier = Modifier
-                            .height(60.dp)
-                            .width(220.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        AnimatedVisibility(
-                            visible = isItemVisible,
-                            enter = slideInHorizontally(initialOffsetX = { -it }) + fadeIn(),
-                            exit = slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
-                        ) {
-                            val isCenter = isInitialScrollCompleted && isMenuExpansionUnlocked && (index == centerIndex)
-                            val boxWidth by animateDpAsState(
-                                targetValue = if (isCenter) 200.dp else 60.dp,
-                                animationSpec = spring(
-                                    dampingRatio = Spring.DampingRatioLowBouncy,
-                                    stiffness = Spring.StiffnessLow
-                                ),
-                                label = "boxWidth"
-                            )
-
-                            Row(
-                                modifier = Modifier
-                                    .width(boxWidth)
-                                    .height(60.dp)
-                                    .background(Color.Black, shape = RoundedCornerShape(12.dp))
-                                    .border(2.dp, Color.White, shape = RoundedCornerShape(12.dp))
-                                    .clickable { item.onClick() },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // Static square container on the left for the icon
-                                Box(
-                                    modifier = Modifier.size(56.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = item.icon,
-                                        contentDescription = item.text,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                // Text displayed only when expanded
-                                if (isCenter && boxWidth > 100.dp) {
-                                    Text(
-                                        text = item.text,
-                                        color = Color.White,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(end = 20.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
-
-private data class MenuItem(
-    val text: String,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val onClick: () -> Unit
-)
 
 private class AdPlaySession(
     val adId: String,
@@ -589,22 +331,14 @@ fun LogoContent(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.DarkGray),
+            .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "LOGO",
-                style = MaterialTheme.typography.displayMedium,
-                color = Color.White
-            )
-            Text(
-                text = "Signage fallback",
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.White.copy(alpha = 0.6f),
-                modifier = Modifier.padding(top = 8.dp)
-            )
-        }
+        Image(
+            painter = painterResource(id = R.drawable.ic_aura_logo),
+            contentDescription = "Aura",
+            modifier = Modifier.width(280.dp)
+        )
     }
 }
 

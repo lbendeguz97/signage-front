@@ -41,7 +41,7 @@ On startup, the app performs a connectivity check (`/echo`) across primary and b
 
 ### Room Database
 Located in `com.example.signage_front.data`.
-* **Database Version**: `11` (with destructive migration support).
+* **Database Version**: `16` (with destructive migration support).
 * **Entities**:
   - `AdStatus`: Stores ad metadata (ID, allowed status, path, display settings, checksum, and sync status).
   - `SyncState`: Tracks synchronization timestamps to optimize server delta queries.
@@ -50,6 +50,7 @@ Located in `com.example.signage_front.data`.
   - `SspConnectivity`: Caches programmatic partner details (name, provider, endpoint URL, deal ID, line item ID, additional parameters).
   - `CachedSspAd`: Tracks pre-fetched SSP media files locally, storing `mediaUrl`, `localPath`, `expiresAt` (TTL), and `lastAccessed`.
   - `PendingBeacon`: Queues offline impression and click beacons (`url`, `createdAt`, `retryCount`).
+  - `PageCategory` / `Page` / `PageLanguage` / `PageMedia`: Browseable HTML pages module — categories, page metadata (rank, widget image, default language, `updatedAt` sync token, `syncStatus`), one `html_content` per language, and per-image sync rows. `PageWithLanguages` is the relation DTO used by the UI.
 * **Sync Mechanism**: A Transaction-based sync ensures the local DB is a mirror of the server. It inserts/updates new records and deletes orphaned records in one atomic step. 
 * **Thread Safety**: Wrapped repository write transactions with `Mutex` locks to prevent concurrent database writes or overlapping file downloads.
 
@@ -76,6 +77,14 @@ Handles local file caching and eviction for programmatic advertisements:
 - **Immediate Sync**: Triggered instantly after successful mTLS check-in.
 - **Programmatic Routines**: Periodically pre-fetches up to 3 programmatic ads and flushes pending offline impression tracking beacons.
 
+### Pages Sync Manager (`PageSyncManager` / `PageMediaManager`)
+Delivers the dashboard's browseable, multi-language HTML pages to the device:
+- **Trigger**: Runs from `AdScheduler` when the server's `pages` sync token changes.
+- **Catalog**: `GET /getPages` reconciles categories, page metadata and media rows in one transaction (`pageDao.syncCatalog`).
+- **Content**: `GET /getPageContent?page_id=` fetches the per-language `html_content` for new/changed pages only (catalog `updated_at` is the max of page + language timestamps).
+- **Media**: `GET /getPageWidget` / `GET /getPageImage` download size-verified files into `filesDir/pages/{id}/widget|images/`.
+- **Integrity**: `checkup()` retries until every page is `VERIFIED` with its media present; orphaned rows/files are pruned.
+
 ---
 
 ## 5. Frontend (UI Layer)
@@ -85,6 +94,9 @@ Handles local file caching and eviction for programmatic advertisements:
     - *SSP rendering*: Inspects cache, plays video/image, fires beacons, triggers redirects, and falls back to skipping the slot if cache is empty.
     - *Kiosk Mode*: No playback controls or buttons are visible.
 - **`HomeScreen`**: Interactive hub for user selection.
+- **`CategoryScreen`**: Category browser reached from the sidebar — a 3-column grid of page "widget" cards (title header + thumbnail). A transparent click target overlays each WebView thumbnail so taps reach the card.
+- **`PageViewScreen`**: Full-screen reader for a single page (route `page/{pageId}`); renders the stored HTML in a **JavaScript-disabled WebView** (static HTML/CSS only), with widget/embedded images inlined as base64 data URIs.
+- **`PageWidget`**: Grid-thumbnail renderer; shares the HTML-build pipeline (`PageHtml.buildPageHtml`) with `PageViewScreen`.
 - **`EnrollmentScreen`**: UI for device registration with OTP input.
 - **`QrCodeScreen`**: Displays a QR code generated from a redirect URL.
 - **`DebugScreen`**: Available only in `dev` environment to assist with connectivity issues.
@@ -110,4 +122,4 @@ Centrally managed in Central Configuration [`Config.kt`](file:///home/lbendeguz9
 
 ---
 
-*Last Updated: 2026-08-11*
+*Last Updated: 2026-09-13*

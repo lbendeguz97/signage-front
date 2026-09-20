@@ -13,6 +13,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
@@ -29,9 +32,16 @@ object AdScheduler {
     private const val TAG = "AdScheduler"
     private const val CONFIG_FILE = "app_config.json"
     private const val SSP_REFRESH_MS = 2 * 60 * 1000L // force a refetch every 2 min so mock playlist changes propagate
+    private const val LOG_UPLOAD_BATCH_SIZE = 300 // cap each /uploadLogs payload (offline backlogs can be large)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isPolling = false
     private var lastSspPrefetchAt = 0L
+
+    // Flipped to true once a full sync pass has completed without pending work
+    // (config + ssp + pages + ads). Used by the home/splash screen to hand off
+    // to the ad screen as soon as content is ready.
+    private val _syncReady = MutableStateFlow(false)
+    val syncReady: StateFlow<Boolean> = _syncReady.asStateFlow()
 
     /**
      * Starts polling. It checks the database status first and syncs only if needed.
@@ -69,6 +79,13 @@ object AdScheduler {
         var adRegistryChanged = false
         var groupPolicyChanged = false
         var sspConnectivityChanged = false
+        var pagesChanged = false
+
+        // Per-section success flags for the "content is ready" signal.
+        var configOk = true
+        var sspOk = true
+        var pagesOk = true
+        var adsOk = true
         
         val pendingTokens = mutableMapOf<String, String>()
         val groupPolicyTableNames = mutableListOf<String>()
@@ -86,6 +103,7 @@ object AdScheduler {
                 when (tableName) {
                     "ad_registry" -> adRegistryChanged = true
                     "ssp_connectivities" -> sspConnectivityChanged = true
+                    "pages" -> pagesChanged = true
                     else -> {
                         groupPolicyChanged = true
                         groupPolicyTableNames.add(tableName)
@@ -97,7 +115,8 @@ object AdScheduler {
         // 1. Sync Config if any group policy table changed
         if (groupPolicyChanged) {
             Log.d(TAG, "Syncing app configuration...")
-            if (fetchAndSyncConfig(context)) {
+            configOk = fetchAndSyncConfig(context)
+            if (configOk) {
                 groupPolicyTableNames.forEach { table ->
                     pendingTokens[table]?.let { token ->
                         repository.updateSyncState(table, token)
@@ -111,7 +130,8 @@ object AdScheduler {
         // 2. Sync SSP Connectivities
         if (sspConnectivityChanged) {
             Log.d(TAG, "Syncing SSP connectivities...")
-            if (fetchAndSyncSspConnectivity(context)) {
+            sspOk = fetchAndSyncSspConnectivity(context)
+            if (sspOk) {
                 pendingTokens["ssp_connectivities"]?.let { token ->
                     repository.updateSyncState("ssp_connectivities", token)
                 }
@@ -119,14 +139,32 @@ object AdScheduler {
             }
         }
 
-        // 3. Sync Ad Registry (metadata + media)
+        // 3. Sync Pages (catalog + HTML + image media). Keep local files/rows
+        //    reconciled with the server even when the token is unchanged.
+        if (pagesChanged) {
+            Log.d(TAG, "Syncing pages...")
+            pagesOk = PageSyncManager.syncPagesIfNeeded(context)
+            if (pagesOk) {
+                pendingTokens["pages"]?.let { token ->
+                    repository.updateSyncState("pages", token)
+                }
+                Log.d(TAG, "Pages sync successful.")
+            } else {
+                Log.w(TAG, "Pages sync incomplete; will retry next cycle.")
+            }
+        } else {
+            PageSyncManager.checkup(context)
+        }
+
+        // 4. Sync Ad Registry (metadata + media)
         // We sync if the server registry changed OR if we have local ads that failed to sync previously
         val localAds = repository.adDao.getAllAdsList()
         val hasIncompleteAds = localAds.any { it.syncStatus != "VERIFIED" }
 
         if (adRegistryChanged) {
             Log.d(TAG, "Server registry changed. Fetching new ad list...")
-            if (fetchAndSyncAdStatus(context)) {
+            adsOk = fetchAndSyncAdStatus(context)
+            if (adsOk) {
                 pendingTokens["ad_registry"]?.let { token ->
                     repository.updateSyncState("ad_registry", token)
                     Log.d(TAG, "Ad registry sync successful.")
@@ -135,9 +173,15 @@ object AdScheduler {
         } else if (hasIncompleteAds) {
             Log.d(TAG, "Registry unchanged, but found incomplete local ads. Retrying sync...")
             // Pass existing list back to repository.syncAds to retry downloads/verification
-            repository.syncAds(localAds)
+            adsOk = repository.syncAds(localAds)
         } else {
             Log.d(TAG, "Ad registry is up to date and all media is verified.")
+        }
+
+        // Everything required for playback is present -> release the home/splash screen.
+        if (configOk && sspOk && pagesOk && adsOk) {
+            if (!_syncReady.value) Log.d(TAG, "Initial sync complete; content is ready.")
+            _syncReady.value = true
         }
     }
 
@@ -318,21 +362,35 @@ object AdScheduler {
         scope.launch {
             while (isActive) {
                 val logSyncTime = getLogSyncTime(context)
-                if (logSyncTime > 0) {
+                if (logSyncTime >= 0) {
+                    // 0 = immediate per play (plus this periodic safety flush); >0 = interval.
                     try {
                         uploadPendingLogs(context)
                     } catch (e: Exception) {
                         Log.e(TAG, "Error in periodic log sync", e)
                     }
-                    delay(logSyncTime * 1000L)
+                    delay(if (logSyncTime > 0) logSyncTime * 1000L else 10 * 1000L)
                 } else {
-                    delay(10 * 1000L) // check again in 10s if setting changed
+                    delay(10 * 1000L) // disabled (-1); re-check in 10s in case the setting changes
                 }
             }
         }
     }
 
+    private val isUploadingLogs = java.util.concurrent.atomic.AtomicBoolean(false)
+
     suspend fun uploadPendingLogs(context: Context) {
+        // The immediate (on-play) and periodic triggers can fire concurrently;
+        // only one upload at a time so PENDING rows aren't sent twice.
+        if (!isUploadingLogs.compareAndSet(false, true)) return
+        try {
+            doUploadPendingLogs(context)
+        } finally {
+            isUploadingLogs.set(false)
+        }
+    }
+
+    private suspend fun doUploadPendingLogs(context: Context) {
         val repository = AdRepository(context)
         val pendingLogs = repository.adDisplayLogDao.getPendingLogs()
         if (pendingLogs.isEmpty()) return
@@ -341,39 +399,47 @@ object AdScheduler {
         if (!SecurityManager.hasValidKey()) return
 
         val client = NetworkClientProvider.getMTlsClient(context)
-        val jsonArray = JSONArray()
-        pendingLogs.forEach { log ->
-            val obj = JSONObject().apply {
-                put("ad_id", log.adId)
-                put("timestamp", log.timestamp)
-                put("duration_ms", log.durationMs)
-                put("clicked", log.clicked)
-                put("exited_screen", log.exitedScreen)
-                if (log.audienceAge != null) put("audience_age", log.audienceAge)
-                if (log.audienceGender != null) put("audience_gender", log.audienceGender)
+        var synced = 0
+
+        // Chunk so a large offline backlog doesn't exceed the server's body limit.
+        pendingLogs.chunked(LOG_UPLOAD_BATCH_SIZE).forEach { batch ->
+            val jsonArray = JSONArray()
+            batch.forEach { log ->
+                val obj = JSONObject().apply {
+                    put("ad_id", log.adId)
+                    put("timestamp", log.timestamp)
+                    put("duration_ms", log.durationMs)
+                    put("clicked", log.clicked)
+                    put("exited_screen", log.exitedScreen)
+                    if (log.audienceAge != null) put("audience_age", log.audienceAge)
+                    if (log.audienceGender != null) put("audience_gender", log.audienceGender)
+                }
+                jsonArray.put(obj)
             }
-            jsonArray.put(obj)
+
+            val requestBody = jsonArray.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${Config.currentBaseUrl}/uploadLogs")
+                .post(requestBody)
+                .build()
+
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful || response.code == 204 || response.code == 200) {
+                        repository.adDisplayLogDao.markLogsSynced(batch.map { it.id })
+                        synced += batch.size
+                    } else {
+                        Log.w(TAG, "Log upload failed with code ${response.code}: ${response.body?.string()}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error uploading logs to server", e)
+            }
         }
 
-        val requestBody = jsonArray.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder()
-            .url("${Config.currentBaseUrl}/uploadLogs")
-            .post(requestBody)
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful || response.code == 204 || response.code == 200) {
-                    val ids = pendingLogs.map { it.id }
-                    repository.adDisplayLogDao.markLogsSynced(ids)
-                    repository.adDisplayLogDao.deleteSyncedLogs() // Cleanup synced logs
-                    Log.i(TAG, "Successfully synced and cleaned up ${pendingLogs.size} logs.")
-                } else {
-                    Log.w(TAG, "Log upload failed with code ${response.code}: ${response.body?.string()}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error uploading logs to server", e)
+        if (synced > 0) {
+            repository.adDisplayLogDao.deleteSyncedLogs() // Cleanup synced logs
+            Log.i(TAG, "Successfully synced and cleaned up $synced of ${pendingLogs.size} logs.")
         }
     }
 

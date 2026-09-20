@@ -3,6 +3,7 @@ package com.example.signage_front.data
 import android.content.Context
 import android.util.Log
 import com.example.signage_front.network.MediaManager
+import com.example.signage_front.network.PageMediaManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,6 +17,7 @@ class AdRepository(private val context: Context) {
     val adDisplayLogDao = database.adDisplayLogDao()
     private val syncDao = database.syncDao()
     val configDao = database.configDao()
+    val pageDao = database.pageDao()
 
     /** Records how an SSP/idle slot was filled so overrun can be measured
      *  and auto-adjusted later. */
@@ -334,7 +336,9 @@ class AdRepository(private val context: Context) {
         configDao.clearSspConnectivities()
         configDao.clearCachedSspAds()
         configDao.clearPendingBeacons()
+        pageDao.clearAll()
         MediaManager.cleanupOrphanedMedia(context, emptyList())
+        PageMediaManager.cleanupOrphanedPageMedia(context, emptyList())
     }
 
     suspend fun insertDisplayLog(log: AdDisplayLog) {

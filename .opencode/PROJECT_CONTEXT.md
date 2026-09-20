@@ -24,9 +24,13 @@ This is an Android digital signage application that displays rotating ads (video
 | `NetworkClientProvider` | `network/NetworkClientProvider.kt` | OkHttp clients for mTLS and standard HTTPS |
 | `AdScheduler` | `network/AdScheduler.kt` | Polling for ad updates, sync orchestration, and beacon flushing |
 | `MediaManager` | `network/MediaManager.kt` | Media file download and local storage |
+| `PageSyncManager` | `network/PageSyncManager.kt` | Browseable-pages catalog + per-language HTML sync (`pages` token) |
+| `PageMediaManager` | `network/PageMediaManager.kt` | Page widget/embedded image download + orphan cleanup |
 | `SspCacheManager` | `network/SspCacheManager.kt` | Eviction (TTL + LRU), background downloads, and tracking beacons |
 | `AdRepository` | `data/AdRepository.kt` | Room database operations for ads (Mutex-guarded) |
 | `AdScreen` | `ui/screens/AdScreen.kt` | Ad carousel display (video/image/HTML/ssp content) |
+| `CategoryScreen` | `ui/screens/CategoryScreen.kt` | Category browser: grid of clickable page thumbnails |
+| `PageViewScreen` | `ui/screens/PageViewScreen.kt` | Full-screen page reader (JS-disabled WebView) |
 
 ### Data Flow
 
@@ -40,7 +44,11 @@ Server (port 4000, HTTPS)
     ├── /getAdStatus (mTLS)
     ├── /getAd?ad_id=X (mTLS, returns media file)
     ├── /getConfig (mTLS)
-    └── /getSspConnectivity (mTLS)
+    ├── /getSspConnectivity (mTLS)
+    ├── /getPages (mTLS, pages catalog — no HTML)
+    ├── /getPageContent?page_id=X (mTLS, per-language HTML)
+    ├── /getPageWidget?page_id=X (mTLS, shared widget image)
+    └── /getPageImage?page_id=X&name=Y (mTLS, embedded image bytes)
     
     ▼
     
@@ -49,8 +57,9 @@ Server (port 4000, HTTPS)
     ├── NetworkClientProvider (mTLS OkHttp client)
     ├── AdScheduler (polls every 1 minute)
     ├── SspCacheManager (enforces 200MB TTL + LRU programmatic cache)
-    ├── Room Database (ad_status, group_config, ssp_connectivities, etc.)
-    └── Local media files (/files/media/{video,image,html}/ & /files/ssp_cache/)
+    ├── PageSyncManager / PageMediaManager (pages catalog, HTML, images)
+    ├── Room Database (ad_status, group_config, ssp_connectivities, pages, etc.)
+    └── Local media files (/files/media/{video,image,html}/, /files/ssp_cache/ & /files/pages/)
 ```
 
 ---
@@ -67,7 +76,7 @@ To prevent race conditions during concurrent startup sync loops, all repository 
 
 ## Database Schema
 
-### Room Database: `signage_database` (Schema version = 11)
+### Room Database: `signage_database` (Schema version = 16)
 
 **Table: `ad_status`** (tracks standard media registry)
 * Tracks columns: `adId`, `adAllowed`, `adult`, `path`, `url`, `display`, `displayTime`, `mediaType`, `expectedChecksum` (SHA-1), `expectedSize`, `syncStatus` (`PENDING`/`DOWNLOADING`/`VERIFIED`/`ERROR`), `lastUpdated`.
@@ -87,6 +96,11 @@ To prevent race conditions during concurrent startup sync loops, all repository 
 **Table: `pending_beacons`** (queues offline tracking requests)
 * Tracks columns: `id` (auto-gen PK), `url`, `createdAt`, `retryCount`.
 
+**Tables: `page_categories`, `pages`, `page_languages`, `page_media`** (browseable HTML pages)
+* `pages`: `id` (PK), `title`, `categoryId`, `rank`, `imagePath` (shared widget image), `defaultLanguage`, `updatedAt` (server sync token), `syncStatus` (`PENDING`/`DOWNLOADING`/`VERIFIED`/`ERROR`).
+* `page_languages` (composite PK `pageId` + `language`): `htmlContent`, `updatedAt` — one HTML document per language.
+* `page_media` (composite PK `pageId` + `isWidget` + `name`): `sizeBytes`, `localPath`, `downloadedAt`.
+
 ---
 
 ## File Storage
@@ -98,6 +112,8 @@ To prevent race conditions during concurrent startup sync loops, all repository 
 │   └── image/ (standard verified images)
 ├── ssp_cache/
 │   └── *.mp4, *.jpg (programmatic cached files)
+├── pages/
+│   └── {pageId}/widget|images/ (page widget image + embedded images)
 └── app_config.json
 ```
 
@@ -113,7 +129,11 @@ To prevent race conditions during concurrent startup sync loops, all repository 
 * **Problem**: Tablets did not pull or render programmatic programmatic slots.
 * **Solution**: Developed `SspCacheManager` with pre-fetching, TTL + LRU eviction (max 200MB), offline tracking beacon queues, and a dedicated `"ssp"` media branching handler in `AdScreen`.
 
+### 3. Browseable HTML Pages (Session 2026-09-13)
+* **Problem**: The dashboard's Pages module (multi-language HTML) had no on-device delivery or viewer.
+* **Solution**: `PageSyncManager` / `PageMediaManager` pull the catalog, per-language HTML and images on the `pages` sync token; `CategoryScreen` renders a clickable thumbnail grid and `PageViewScreen` renders one page full-screen in a **JavaScript-disabled WebView**, with widget/embedded images inlined as base64 (`PageHtml.buildPageHtml`). Room schema bumped to v16.
+
 ---
 
-*Last updated: 2026-08-11*
-*Session: Implemented thread-safe Mutex locking, SspCacheManager caching (TTL/LRU), and SspContent playback with offline beacons.*
+*Last updated: 2026-09-13*
+*Session: Added browseable HTML pages delivery (sync + category grid + full-screen JS-disabled reader).*
