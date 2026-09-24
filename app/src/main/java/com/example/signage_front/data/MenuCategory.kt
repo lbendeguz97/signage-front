@@ -16,14 +16,16 @@ enum class MenuCategory(
     val key: String,
     val labelHu: String,
     val labelEn: String,
+    val labelDe: String,
     val icon: ImageVector
 ) {
-    RESTAURANTS(1L, "restaurants", "Éttermek", "Restaurants", Icons.Filled.Restaurant),
-    HOTELS(2L, "hotels", "Szállodák", "Hotels", Icons.Filled.Hotel),
-    ENTERTAINMENT(3L, "entertainment", "Szórakozás", "Entertainment", Icons.Filled.TheaterComedy),
-    EVENTS(4L, "events", "Események", "Events", Icons.Filled.Event);
+    RESTAURANTS(1L, "restaurants", "Éttermek", "Restaurants", "Restaurants", Icons.Filled.Restaurant),
+    HOTELS(2L, "hotels", "Szállodák", "Hotels", "Hotels", Icons.Filled.Hotel),
+    ENTERTAINMENT(3L, "entertainment", "Szórakozás", "Entertainment", "Unterhaltung", Icons.Filled.TheaterComedy),
+    EVENTS(4L, "events", "Események", "Events", "Veranstaltungen", Icons.Filled.Event);
 
-    fun label(language: String): String = if (language == LanguageManager.EN) labelEn else labelHu
+    fun label(language: String): String =
+        LanguageManager.t(language, labelHu, labelEn, labelDe)
 
     companion object {
         fun byId(id: Long): MenuCategory? = entries.firstOrNull { it.id == id }

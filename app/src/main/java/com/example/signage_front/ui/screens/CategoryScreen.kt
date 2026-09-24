@@ -96,7 +96,7 @@ fun CategoryScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (language == LanguageManager.EN) "No content yet" else "Még nincs tartalom",
+                    text = LanguageManager.t(language, "Még nincs tartalom", "No content yet", "Noch keine Inhalte"),
                     color = TextDark.copy(alpha = 0.6f),
                     style = MaterialTheme.typography.titleMedium
                 )

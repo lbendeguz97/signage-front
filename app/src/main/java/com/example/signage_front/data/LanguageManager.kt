@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * App-wide UI language for hardcoded labels and page HTML selection (HU/EN).
+ * App-wide UI language for hardcoded labels and page HTML selection (HU/EN/DE).
  * Persisted in SharedPreferences and exposed as a StateFlow so Compose recomposes.
  */
 object LanguageManager {
@@ -15,6 +15,10 @@ object LanguageManager {
 
     const val HU = "hu"
     const val EN = "en"
+    const val DE = "de"
+
+    /** Selectable UI languages, in menu order. */
+    val supported = listOf(HU, EN, DE)
 
     private val _language = MutableStateFlow(HU)
     val language: StateFlow<String> = _language.asStateFlow()
@@ -32,5 +36,20 @@ object LanguageManager {
 
     fun toggle(context: Context) {
         set(context, if (_language.value == EN) HU else EN)
+    }
+
+    /** Endonym shown in the language picker (Magyar / English / Deutsch). */
+    fun displayName(language: String): String = when (language) {
+        HU -> "Magyar"
+        EN -> "English"
+        DE -> "Deutsch"
+        else -> language
+    }
+
+    /** Picks the string for [language], falling back to Hungarian. */
+    fun t(language: String, hu: String, en: String, de: String): String = when (language) {
+        EN -> en
+        DE -> de
+        else -> hu
     }
 }

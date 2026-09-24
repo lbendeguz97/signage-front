@@ -21,15 +21,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Campaign
-import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
@@ -37,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -48,6 +51,7 @@ import androidx.navigation.navArgument
 import com.example.signage_front.data.AdRepository
 import com.example.signage_front.data.AdStatus
 import com.example.signage_front.data.ContentOrchestrator
+import com.example.signage_front.data.DeviceDisplay
 import com.example.signage_front.data.GroupConfig
 import com.example.signage_front.data.LanguageManager
 import com.example.signage_front.data.MenuCategory
@@ -61,6 +65,7 @@ import com.example.signage_front.network.NetworkClientProvider
 import com.example.signage_front.network.SecurityManager
 import com.example.signage_front.receiver.WakeReceiver
 import com.example.signage_front.ui.composables.RootSidebar
+import com.example.signage_front.ui.composables.SettingsDialog
 import com.example.signage_front.ui.composables.SidebarItem
 import com.example.signage_front.ui.screens.*
 import com.example.signage_front.ui.theme.SignagefrontTheme
@@ -105,6 +110,7 @@ class MainActivity : ComponentActivity() {
         val repository = AdRepository(applicationContext)
 
         LanguageManager.init(applicationContext)
+        DeviceDisplay.init(applicationContext)
 
         ContentOrchestrator.start(applicationContext)
 
@@ -179,10 +185,28 @@ class MainActivity : ComponentActivity() {
 
             SignagefrontTheme {
                 val language by LanguageManager.language.collectAsState()
+                val isIdle by DeviceDisplay.isIdle.collectAsState()
+                val brightness by DeviceDisplay.brightness.collectAsState()
                 val rootGroupConfig by repository.configDao.getGroupConfigFlow().collectAsState(initial = null)
                 val isInteractive = isInteractiveMode(rootGroupConfig)
                 var showMenu by remember { mutableStateOf(false) }
+                var showSettings by remember { mutableStateOf(false) }
                 var menuInteractionTime by remember { mutableLongStateOf(0L) }
+
+                // Apply the configured window brightness; idle dims the panel to near-black.
+                LaunchedEffect(isIdle, brightness) {
+                    val attrs = window.attributes
+                    attrs.screenBrightness = if (isIdle) DeviceDisplay.IDLE_BRIGHTNESS else brightness
+                    window.attributes = attrs
+                }
+
+                // Idle ends on touch or after the 3-minute timeout, always returning to the ad loop.
+                val wakeFromIdle: () -> Unit = {
+                    DeviceDisplay.exitIdle()
+                    navController.navigate("ad") {
+                        popUpTo("home") { inclusive = true }
+                    }
+                }
 
                 val density = LocalDensity.current
                 val edgeThresholdPx = remember(density) { with(density) { 60.dp.toPx() } }
@@ -234,16 +258,17 @@ class MainActivity : ComponentActivity() {
                             navController.navigate("category/${category.id}")
                         })
                     }
-                    add(SidebarItem(if (language == LanguageManager.EN) "Weather" else "Időjárás", Icons.Filled.WbSunny) {
+                    add(SidebarItem(LanguageManager.t(language, "Időjárás", "Weather", "Wetter"), Icons.Filled.WbSunny) {
                         showMenu = false
                         navController.navigate("weather")
                     })
-                    add(SidebarItem(if (language == LanguageManager.EN) "Advertisement" else "Reklám", Icons.Filled.Campaign) {
+                    add(SidebarItem(LanguageManager.t(language, "Reklám", "Advertisement", "Werbung"), Icons.Filled.Campaign) {
                         showMenu = false
                         navController.navigate("ad")
                     })
-                    add(SidebarItem(if (language == LanguageManager.EN) "Nyelv: HU" else "Nyelv: EN", Icons.Filled.Language) {
-                        LanguageManager.toggle(applicationContext)
+                    add(SidebarItem(LanguageManager.t(language, "Beállítások", "Settings", "Einstellungen"), Icons.Filled.Settings) {
+                        showMenu = false
+                        showSettings = true
                     })
                 }
 
@@ -368,6 +393,7 @@ class MainActivity : ComponentActivity() {
                             if (playlistItems.isNotEmpty()) {
                                 AdScreen(
                                     items = playlistItems,
+                                    isIdle = isIdle,
                                     pendingInterruptPriority = orchState.pendingInterrupt?.priority,
                                     onTriggerLoopComplete = {
                                         val t = orchState.triggerQueue.firstOrNull()
@@ -437,6 +463,32 @@ class MainActivity : ComponentActivity() {
                     onScrimClick = { showMenu = false },
                     onInteraction = { menuInteractionTime = System.currentTimeMillis() }
                 )
+
+                SettingsDialog(
+                    visible = showSettings,
+                    onDismiss = { showSettings = false },
+                    onTurnOff = {
+                        showSettings = false
+                        DeviceDisplay.enterIdle()
+                    }
+                )
+
+                // Soft screen-off: a blank, dimmed surface that wakes on touch or
+                // after the timeout, returning to the ad loop.
+                if (isIdle) {
+                    LaunchedEffect(Unit) {
+                        delay(DeviceDisplay.IDLE_TIMEOUT_MS)
+                        wakeFromIdle()
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black)
+                            .pointerInput(Unit) {
+                                detectTapGestures { wakeFromIdle() }
+                            }
+                    )
+                }
                 }
             }
         }
@@ -496,6 +548,17 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // Re-apply immersive mode when activity resumes
         enableImmersiveFullscreen()
+        applyCurrentBrightness()
+    }
+
+    private fun applyCurrentBrightness() {
+        val attrs = window.attributes
+        attrs.screenBrightness = if (DeviceDisplay.isIdle.value) {
+            DeviceDisplay.IDLE_BRIGHTNESS
+        } else {
+            DeviceDisplay.brightness.value
+        }
+        window.attributes = attrs
     }
 
     private fun scheduleWakeUp(context: Context) {

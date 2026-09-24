@@ -119,10 +119,18 @@ fun PageViewScreen(
             } else if (loaded) {
                 Text(
                     text = when {
-                        page == null && language == LanguageManager.EN -> "Page not found"
-                        page == null -> "Az oldal nem található"
-                        language == LanguageManager.EN -> "No content yet"
-                        else -> "Még nincs tartalom"
+                        page == null -> LanguageManager.t(
+                            language,
+                            "Az oldal nem található",
+                            "Page not found",
+                            "Seite nicht gefunden"
+                        )
+                        else -> LanguageManager.t(
+                            language,
+                            "Még nincs tartalom",
+                            "No content yet",
+                            "Noch keine Inhalte"
+                        )
                     },
                     color = TextDark.copy(alpha = 0.6f),
                     style = MaterialTheme.typography.titleMedium,

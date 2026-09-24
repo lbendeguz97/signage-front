@@ -23,7 +23,7 @@ data class FaceAnalysisResult(
 
 class FaceDetectionManager(
     private val ageGenderClassifier: AgeGenderClassifier
-) : ImageAnalysis.Analyzer {
+) : ImageAnalysis.Analyzer, AutoCloseable {
 
     private val TAG = "FaceDetectionManager"
 
@@ -75,11 +75,15 @@ class FaceDetectionManager(
                         val width = boundingBox.width().coerceIn(1, fullBitmap.width - left)
                         val height = boundingBox.height().coerceIn(1, fullBitmap.height - top)
 
-                        val croppedFace = Bitmap.createBitmap(fullBitmap, left, top, width, height)
+                    val croppedFace = Bitmap.createBitmap(fullBitmap, left, top, width, height)
 
-                        // Run age and gender classifier (uses TFLite or fallback)
-                        val trackingId = if (primaryFace.trackingId != -1) primaryFace.trackingId else null
-                        val (age, gender) = ageGenderClassifier.predict(croppedFace, trackingId)
+                    // Run age and gender classifier (uses TFLite or fallback)
+                    val trackingId = if (primaryFace.trackingId != -1) primaryFace.trackingId else null
+                    val (age, gender) = ageGenderClassifier.predict(croppedFace, trackingId)
+
+                    // Bitmaps were only needed for this inference pass.
+                    if (croppedFace !== fullBitmap) croppedFace.recycle()
+                    fullBitmap.recycle()
 
                         _faceResult.value = FaceAnalysisResult(
                             isFacePresent = true,
@@ -107,5 +111,9 @@ class FaceDetectionManager(
             .addOnCompleteListener {
                 imageProxy.close()
             }
+    }
+
+    override fun close() {
+        runCatching { detector.close() }
     }
 }

@@ -81,17 +81,73 @@ fun FaceDetectionCameraPreview(
     val classifier = remember(context) { AgeGenderClassifier(context) }
     val detectionManager = remember(classifier) { FaceDetectionManager(classifier) }
 
+    // Keep the callback current without making it a binding key.
+    val currentOnFaceAnalyzed by rememberUpdatedState(onFaceAnalyzed)
+
     // Collect flow values to expose to the callback
     val analysisResult by detectionManager.faceResult.collectAsState()
 
     LaunchedEffect(analysisResult) {
-        onFaceAnalyzed(analysisResult)
+        currentOnFaceAnalyzed(analysisResult)
     }
 
+    // The PreviewView is created by AndroidView; binding is driven by side effects
+    // (not AndroidView.update) so ordinary recompositions never rebind the camera.
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+
+    // One-time teardown of the analysis pipeline.
     DisposableEffect(Unit) {
         onDispose {
             cameraExecutor.shutdown()
+            detectionManager.close()
             classifier.close()
+        }
+    }
+
+    // Bind exactly once per permission/lifecycle/view change, and unbind on dispose.
+    DisposableEffect(hasCameraPermission, previewView, lifecycleOwner) {
+        val pv = previewView
+        if (!hasCameraPermission || pv == null) {
+            return@DisposableEffect onDispose {}
+        }
+
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        var cameraProvider: ProcessCameraProvider? = null
+        var disposed = false
+
+        val bindListener = Runnable {
+            if (disposed) return@Runnable
+            try {
+                val provider = cameraProviderFuture.get()
+                cameraProvider = provider
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(pv.surfaceProvider)
+                }
+
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                    .build()
+                    .also {
+                        it.setAnalyzer(cameraExecutor, detectionManager)
+                    }
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    preview,
+                    imageAnalysis
+                )
+            } catch (e: Exception) {
+                Log.e("CameraPreview", "Camera Binding failed: ${e.message}", e)
+            }
+        }
+        cameraProviderFuture.addListener(bindListener, ContextCompat.getMainExecutor(context))
+
+        onDispose {
+            disposed = true
+            runCatching { cameraProvider?.unbindAll() }
         }
     }
 
@@ -99,7 +155,7 @@ fun FaceDetectionCameraPreview(
         modifier = modifier,
         contentAlignment = Alignment.TopEnd
     ) {
-        // Camera Preview setup
+        // Camera Preview setup (view only; binding is handled by the effect above)
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
@@ -108,6 +164,7 @@ fun FaceDetectionCameraPreview(
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    previewView = this
                 }
             },
             modifier = if (showPreview) {
@@ -118,37 +175,6 @@ fun FaceDetectionCameraPreview(
             } else {
                 // Keep the preview running headless/invisible to satisfy CameraX constraints on low-end hardware
                 Modifier.size(1.dp)
-            },
-            update = { previewView ->
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                cameraProviderFuture.addListener({
-                    try {
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
-
-                        val imageAnalysis = ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                            .build()
-                            .also {
-                                it.setAnalyzer(cameraExecutor, detectionManager)
-                            }
-
-                        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            cameraSelector,
-                            preview,
-                            imageAnalysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e("CameraPreview", "Camera Binding failed: ${e.message}", e)
-                    }
-                }, ContextCompat.getMainExecutor(context))
             }
         )
 
@@ -170,7 +196,7 @@ fun FaceDetectionCameraPreview(
                         fontSize = 10.sp,
                         style = androidx.compose.material3.MaterialTheme.typography.labelSmall
                     )
-                    
+
                     if (analysisResult.isFacePresent) {
                         analysisResult.gender?.let {
                             Text(

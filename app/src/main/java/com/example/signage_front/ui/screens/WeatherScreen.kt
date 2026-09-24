@@ -151,16 +151,20 @@ fun WeatherScreen(
                 }
                 loading -> LoadingState()
                 permissionDenied -> MessageState(
-                    if (language == LanguageManager.EN)
-                        "Location permission is required to show local weather."
-                    else
-                        "A helyi időjárás megjelenítéséhez helymeghatározási engedély szükséges."
+                    LanguageManager.t(
+                        language,
+                        "A helyi időjárás megjelenítéséhez helymeghatározási engedély szükséges.",
+                        "Location permission is required to show local weather.",
+                        "Für die Anzeige des lokalen Wetters ist eine Standortberechtigung erforderlich."
+                    )
                 )
                 else -> MessageState(
-                    if (language == LanguageManager.EN)
-                        "Weather is unavailable. Check the connection and refresh."
-                    else
-                        "Az időjárás jelenleg nem érhető el. Ellenőrizze a kapcsolatot."
+                    LanguageManager.t(
+                        language,
+                        "Az időjárás jelenleg nem érhető el. Ellenőrizze a kapcsolatot.",
+                        "Weather is unavailable. Check the connection and refresh.",
+                        "Wetter ist nicht verfügbar. Verbindung prüfen und aktualisieren."
+                    )
                 )
             }
         }
@@ -187,7 +191,7 @@ private fun WeatherTopBar(
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
             Text(
                 text = bundle?.cityName?.takeIf { it.isNotBlank() }
-                    ?: if (language == LanguageManager.EN) "Weather" else "Időjárás",
+                    ?: LanguageManager.t(language, "Időjárás", "Weather", "Wetter"),
                 color = TextOnGlass,
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
@@ -197,7 +201,7 @@ private fun WeatherTopBar(
             val subtitle = buildList {
                 bundle?.regionTitle?.takeIf { it.isNotBlank() }?.let { add(it) }
                 bundle?.let { add(updatedLabel(it, language)) }
-                if (bundle?.stale == true) add(if (language == LanguageManager.EN) "offline" else "offline")
+                if (bundle?.stale == true) add("offline")
             }.joinToString("  •  ")
             if (subtitle.isNotBlank()) {
                 Text(
@@ -306,16 +310,16 @@ private fun CurrentHero(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Icons.Filled.Thermostat, formatTemp(current?.windChill), if (language == LanguageManager.EN) "Feels like" else "Hőérzet", Modifier.weight(1f))
-                Metric(Icons.Filled.Air, current?.let { "${it.windStrength.toInt()} ${it.windDirection}" } ?: "—", if (language == LanguageManager.EN) "Wind" else "Szél", Modifier.weight(1f))
+                Metric(Icons.Filled.Thermostat, formatTemp(current?.windChill), LanguageManager.t(language, "Hőérzet", "Feels like", "Gefühlt"), Modifier.weight(1f))
+                Metric(Icons.Filled.Air, current?.let { "${it.windStrength.toInt()} ${it.windDirection}" } ?: "—", LanguageManager.t(language, "Szél", "Wind", "Wind"), Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Metric(Icons.Filled.WaterDrop, current?.let { "${it.humidity}%" } ?: "—", if (language == LanguageManager.EN) "Humidity" else "Pára", Modifier.weight(1f))
+                Metric(Icons.Filled.WaterDrop, current?.let { "${it.humidity}%" } ?: "—", LanguageManager.t(language, "Pára", "Humidity", "Luftfeuchtigkeit"), Modifier.weight(1f))
                 Metric(Icons.Filled.WbSunny, current?.uvIndex?.toString() ?: "—", current?.uvTitle ?: "UV", Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Metric(Icons.Filled.Compress, current?.let { "${it.pressure}" } ?: "—", "hPa", Modifier.weight(1f))
-                Metric(Icons.Filled.WaterDrop, current?.let { "${formatNum(it.rain)} mm" } ?: "—", if (language == LanguageManager.EN) "Rain" else "Csapadék", Modifier.weight(1f))
+                Metric(Icons.Filled.WaterDrop, current?.let { "${formatNum(it.rain)} mm" } ?: "—", LanguageManager.t(language, "Csapadék", "Rain", "Regen"), Modifier.weight(1f))
             }
         }
     }
@@ -375,7 +379,7 @@ private fun HourlyStrip(
             .padding(vertical = 12.dp)
     ) {
         Text(
-            text = if (language == LanguageManager.EN) "Hourly" else "Óránkénti",
+            text = LanguageManager.t(language, "Óránkénti", "Hourly", "Stündlich"),
             color = TextDark,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
@@ -431,7 +435,7 @@ private fun WeeklyPanel(
             .padding(vertical = 16.dp)
     ) {
         Text(
-            text = if (language == LanguageManager.EN) "7-day forecast" else "7 napos előrejelzés",
+            text = LanguageManager.t(language, "7 napos előrejelzés", "7-day forecast", "7-Tage-Vorhersage"),
             color = TextDark,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
@@ -440,7 +444,7 @@ private fun WeeklyPanel(
         if (week.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = if (language == LanguageManager.EN) "No data" else "Nincs adat",
+                    text = LanguageManager.t(language, "Nincs adat", "No data", "Keine Daten"),
                     color = TextMuted
                 )
             }
@@ -579,22 +583,27 @@ private fun formatTemp(value: Double?): String {
 private fun formatNum(value: Double): String =
     if (value == Math.floor(value)) value.toInt().toString() else String.format(Locale.US, "%.1f", value)
 
-private fun hourLabel(entry: HourEntry, language: String): String = when {
-    entry.dayOffset == 0 -> "${entry.hour}:00"
-    language == LanguageManager.EN -> "tom ${entry.hour}h"
-    else -> "holnap ${entry.hour}h"
-}
+private fun hourLabel(entry: HourEntry, language: String): String =
+    if (entry.dayOffset == 0) {
+        "${entry.hour}:00"
+    } else {
+        "${LanguageManager.t(language, "holnap", "tom", "morgen")} ${entry.hour}h"
+    }
 
 private fun updatedLabel(bundle: WeatherManager.WeatherBundle, language: String): String {
     val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(bundle.fetchedAt))
-    return if (language == LanguageManager.EN) "Updated $time" else "Frissítve: $time"
+    return LanguageManager.t(language, "Frissítve: $time", "Updated $time", "Aktualisiert: $time")
 }
 
 private fun dayLabel(dayAfter: Int, language: String): String {
-    if (dayAfter == 0) return if (language == LanguageManager.EN) "Today" else "Ma"
-    if (dayAfter == 1) return if (language == LanguageManager.EN) "Tomorrow" else "Holnap"
+    if (dayAfter == 0) return LanguageManager.t(language, "Ma", "Today", "Heute")
+    if (dayAfter == 1) return LanguageManager.t(language, "Holnap", "Tomorrow", "Morgen")
     val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, dayAfter) }
-    val locale = if (language == LanguageManager.EN) Locale.ENGLISH else Locale.forLanguageTag("hu")
+    val locale = when (language) {
+        LanguageManager.EN -> Locale.ENGLISH
+        LanguageManager.DE -> Locale.GERMAN
+        else -> Locale.forLanguageTag("hu")
+    }
     return SimpleDateFormat("EEE", locale).format(cal.time)
 }
 
@@ -647,6 +656,19 @@ private fun weatherLabel(icon: String, language: String): String {
         i.contains("valtozo") || i.contains("változó") -> "Változóan felhős"
         i.contains("felhos") || i.contains("felhős") -> "Felhős"
         i.contains("derult") || i.contains("derült") -> "Derült"
+        else -> "—"
+    }
+    if (language == LanguageManager.DE) return when (hu) {
+        "Zivatar" -> "Gewitter"
+        "Havazás" -> "Schnee"
+        "Zápor" -> "Schauer"
+        "Eső" -> "Regen"
+        "Szitálás" -> "Nieselregen"
+        "Köd" -> "Nebel"
+        "Borult" -> "Bedeckt"
+        "Változóan felhős" -> "Teilweise bewölkt"
+        "Felhős" -> "Bewölkt"
+        "Derült" -> "Klar"
         else -> "—"
     }
     if (language != LanguageManager.EN) return hu

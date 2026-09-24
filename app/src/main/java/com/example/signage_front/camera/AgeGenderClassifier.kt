@@ -77,6 +77,7 @@ class AgeGenderClassifier(private val context: Context) : AutoCloseable {
         // UTKFace Age model expects 200x200 RGB input
         val resized = Bitmap.createScaledBitmap(faceBitmap, 200, 200, true)
         val byteBuffer = convertBitmapToByteBuffer(resized, 200)
+        if (resized !== faceBitmap) resized.recycle()
 
         // Age model typically outputs shape (1, 1) regression output
         val outputArray = Array(1) { FloatArray(1) }
@@ -97,6 +98,7 @@ class AgeGenderClassifier(private val context: Context) : AutoCloseable {
         // UTKFace Gender model expects 128x128 RGB input
         val resized = Bitmap.createScaledBitmap(faceBitmap, 128, 128, true)
         val byteBuffer = convertBitmapToByteBuffer(resized, 128)
+        if (resized !== faceBitmap) resized.recycle()
 
         // Gender model outputs binary probabilities (1, 2) or single (1, 1)
         val genderOutput = Array(1) { FloatArray(2) }

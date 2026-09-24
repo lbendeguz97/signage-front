@@ -54,7 +54,6 @@ import com.example.signage_front.data.AdDisplayLog
 import com.example.signage_front.data.AdRepository
 import com.example.signage_front.network.AdScheduler
 import com.example.signage_front.network.MediaManager
-import com.example.signage_front.network.Config
 import com.example.signage_front.ui.composables.FaceDetectionCameraPreview
 import com.multiplatform.webview.web.WebView
 import com.multiplatform.webview.web.rememberWebViewState
@@ -71,8 +70,15 @@ fun AdScreen(
     onNavigateToDebug: () -> Unit,
     modifier: Modifier = Modifier,
     pendingInterruptPriority: String? = null,
-    onTriggerLoopComplete: (() -> Unit)? = null
+    onTriggerLoopComplete: (() -> Unit)? = null,
+    isIdle: Boolean = false
 ) {
+    // While idling, render nothing so players/webviews are disposed (no ad, no audio).
+    if (isIdle) {
+        Box(modifier = modifier.fillMaxSize().background(Color.Black))
+        return
+    }
+
     var currentIndex by remember { mutableIntStateOf(0) }
     val currentItem = if (items.isNotEmpty()) items[currentIndex % items.size] else null
 
@@ -103,6 +109,17 @@ fun AdScreen(
     val context = LocalContext.current
     val repository = remember(context) { AdRepository(context) }
     val scope = rememberCoroutineScope()
+
+    // Single ExoPlayer reused by every video source on this screen. It is created
+    // once and released when the ad screen leaves; individual items only swap the
+    // media item, so looping an ad no longer spawns a new player every cycle.
+    val exoPlayer = remember { ExoPlayer.Builder(context).build() }
+    DisposableEffect(Unit) {
+        onDispose {
+            exoPlayer.stop()
+            exoPlayer.release()
+        }
+    }
 
     // Tracks the active ad play session. Only backed-by-an-ad items (Standard/VirtualSsp)
     // produce a loggable session; logo/group-SSP items have no ad id.
@@ -197,6 +214,29 @@ fun AdScreen(
                 (currentItem as? PlaylistItem.Standard)?.adStatus?.url?.let { onAdClick(it) }
             }
     ) {
+        // Persistent video output surface: mounted once for the whole ad screen and
+        // reused across every item and loop, so no per-cycle TextureView/player churn.
+        AndroidView(
+            factory = { ctx ->
+                TextureView(ctx).also { exoPlayer.setVideoTextureView(it) }
+            },
+            onRelease = { textureView -> exoPlayer.clearVideoTextureView(textureView) },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Detach media when the current item never uses the player (image/html/logo).
+        // Video and SSP items attach their own media item further below.
+        LaunchedEffect(currentItem) {
+            val mediaType = (currentItem as? PlaylistItem.Standard)?.adStatus?.mediaType?.lowercase()
+            val usesPlayer = mediaType == "video" || mediaType == "ssp" ||
+                currentItem is PlaylistItem.VirtualSsp ||
+                currentItem is PlaylistItem.GroupSspSlot
+            if (!usesPlayer) {
+                exoPlayer.stop()
+                exoPlayer.clearMediaItems()
+            }
+        }
+
         // Use currentIndex as part of the key to force re-composition
         key(currentIndex, currentAd?.adId) {
             when (val item = currentItem) {
@@ -206,6 +246,7 @@ fun AdScreen(
                     when (ad.mediaType?.lowercase()) {
                         "video" -> {
                             VideoContent(
+                                player = exoPlayer,
                                 videoFile = file,
                                 playbackId = currentIndex,
                                 onFinished = onAdFinished
@@ -227,6 +268,7 @@ fun AdScreen(
                         }
                         "ssp" -> {
                             SspContent(
+                                player = exoPlayer,
                                 playbackId = currentIndex,
                                 onFinished = onAdFinished,
                                 onAdClick = onAdClick
@@ -242,6 +284,7 @@ fun AdScreen(
                 }
                 is PlaylistItem.VirtualSsp -> {
                     SspContent(
+                        player = exoPlayer,
                         playbackId = currentIndex,
                         onFinished = onAdFinished,
                         onAdClick = onAdClick,
@@ -251,6 +294,7 @@ fun AdScreen(
                 }
                 is PlaylistItem.GroupSspSlot -> {
                     SspContent(
+                        player = exoPlayer,
                         playbackId = currentIndex,
                         onFinished = onAdFinished,
                         onAdClick = onAdClick,
@@ -291,7 +335,7 @@ fun AdScreen(
                     }
                 }
             },
-            showPreview = Config.ENV == "dev",
+            showPreview = false,
             modifier = Modifier
                 .align(androidx.compose.ui.Alignment.TopEnd)
                 .padding(16.dp)
@@ -412,79 +456,73 @@ fun ImageContent(
 }
 
 /**
- * Video content using TextureView instead of SurfaceView.
- * TextureView doesn't have the Z-ordering issues that SurfaceView has,
- * which can cause black screens when switching between video and other content.
+ * Plays [videoFile] on the shared [player] owned by AdScreen. This composable only
+ * swaps the media item and manages the per-play listener; the player and its output
+ * surface are created once by the caller, so no player/TextureView is allocated here.
  */
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoContent(
+    player: ExoPlayer,
     videoFile: File,
     playbackId: Int,
     onFinished: () -> Unit,
-    modifier: Modifier = Modifier,
     onProgress: ((Float) -> Unit)? = null,
     maxDurationMs: Long? = null
 ) {
-    val context = LocalContext.current
-
     android.util.Log.d("VideoContent", "VideoContent composing with playbackId=$playbackId, file=${videoFile.name}")
+
+    val currentOnFinished by rememberUpdatedState(onFinished)
 
     // State to track if video has finished - prevents multiple onFinished calls
     var hasFinished by remember(playbackId) { mutableStateOf(false) }
 
-    val exoPlayer = remember(playbackId) {
-        android.util.Log.d("VideoContent", "Creating new ExoPlayer for playbackId=$playbackId, file=${videoFile.absolutePath}")
-        ExoPlayer.Builder(context).build().apply {
-            val mediaItem = MediaItem.fromUri(videoFile.absolutePath)
-            setMediaItem(mediaItem)
-            prepare()
-            playWhenReady = true
-            repeatMode = Player.REPEAT_MODE_OFF
-
-            addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(state: Int) {
-                    val stateName = when (state) {
-                        Player.STATE_IDLE -> "IDLE"
-                        Player.STATE_BUFFERING -> "BUFFERING"
-                        Player.STATE_READY -> "READY"
-                        Player.STATE_ENDED -> "ENDED"
-                        else -> "UNKNOWN($state)"
-                    }
-                    android.util.Log.d("VideoContent", "Playback state: $stateName (playbackId=$playbackId)")
-                    if (state == Player.STATE_ENDED && !hasFinished) {
-                        hasFinished = true
-                        onFinished()
-                    }
-                }
-
-                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    android.util.Log.e("VideoContent", "Playback error (playbackId=$playbackId): ${error.message}", error)
-                    if (!hasFinished) {
-                        hasFinished = true
-                        onFinished()
-                    }
-                }
-            })
-        }
+    // (Re)start the media whenever the play token or media file changes.
+    LaunchedEffect(playbackId, videoFile.absolutePath) {
+        android.util.Log.d("VideoContent", "Starting media on shared player (playbackId=$playbackId, file=${videoFile.absolutePath})")
+        hasFinished = false
+        player.setMediaItem(MediaItem.fromUri(videoFile.absolutePath))
+        player.repeatMode = Player.REPEAT_MODE_OFF
+        player.prepare()
+        player.playWhenReady = true
     }
 
-    DisposableEffect(playbackId) {
-        onDispose {
-            android.util.Log.d("VideoContent", "Releasing ExoPlayer (playbackId=$playbackId)")
-            exoPlayer.stop()
-            exoPlayer.clearMediaItems()
-            exoPlayer.release()
+    DisposableEffect(playbackId, player) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                val stateName = when (state) {
+                    Player.STATE_IDLE -> "IDLE"
+                    Player.STATE_BUFFERING -> "BUFFERING"
+                    Player.STATE_READY -> "READY"
+                    Player.STATE_ENDED -> "ENDED"
+                    else -> "UNKNOWN($state)"
+                }
+                android.util.Log.d("VideoContent", "Playback state: $stateName (playbackId=$playbackId)")
+                if (state == Player.STATE_ENDED && !hasFinished) {
+                    hasFinished = true
+                    currentOnFinished()
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                android.util.Log.e("VideoContent", "Playback error (playbackId=$playbackId): ${error.message}", error)
+                if (!hasFinished) {
+                    hasFinished = true
+                    currentOnFinished()
+                }
+            }
         }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
     }
 
     // Poll playback position (used for VAST quartile tracking)
     LaunchedEffect(playbackId, onProgress) {
         if (onProgress == null) return@LaunchedEffect
         while (true) {
-            val duration = exoPlayer.duration
+            val duration = player.duration
             if (duration > 0) {
-                onProgress((exoPlayer.currentPosition.toFloat() / duration).coerceIn(0f, 1f))
+                onProgress((player.currentPosition.toFloat() / duration).coerceIn(0f, 1f))
             }
             delay(500)
         }
@@ -496,30 +534,15 @@ fun VideoContent(
         delay(cap)
         if (!hasFinished) {
             hasFinished = true
-            exoPlayer.pause()
-            onFinished()
+            player.pause()
+            currentOnFinished()
         }
     }
-
-    // Use TextureView directly instead of PlayerView with SurfaceView
-    // TextureView works better with Compose's view hierarchy and doesn't have Z-ordering issues
-    AndroidView(
-        factory = { ctx ->
-            android.util.Log.d("VideoContent", "Creating TextureView (playbackId=$playbackId)")
-            TextureView(ctx).also { textureView ->
-                exoPlayer.setVideoTextureView(textureView)
-            }
-        },
-        modifier = modifier.fillMaxSize(),
-        onRelease = { textureView ->
-            android.util.Log.d("VideoContent", "Releasing TextureView (playbackId=$playbackId)")
-            exoPlayer.clearVideoTextureView(textureView)
-        }
-    )
 }
 
 @Composable
 fun SspContent(
+    player: ExoPlayer,
     playbackId: Int,
     onFinished: () -> Unit,
     onAdClick: (String) -> Unit,
@@ -593,6 +616,7 @@ fun SspContent(
         currentAd != null -> {
             key(queueIndex) {
                 SspCachedAdView(
+                    player = player,
                     playbackId = playbackId + queueIndex,
                     ad = currentAd,
                     onAdClick = onAdClick,
@@ -603,6 +627,7 @@ fun SspContent(
         fallbackFile != null && !fallbackShown -> {
             key("fallback") {
                 SspFallbackView(
+                    player = player,
                     playbackId = playbackId,
                     fallbackFile = fallbackFile,
                     durationMs = remainingMs(),
@@ -629,6 +654,7 @@ private const val SSP_FALLBACK_DEFAULT_MS = 10_000L
  */
 @Composable
 private fun SspCachedAdView(
+    player: ExoPlayer,
     playbackId: Int,
     ad: CachedSspAd,
     onAdClick: (String) -> Unit,
@@ -687,6 +713,7 @@ private fun SspCachedAdView(
         when (ad.mediaType.lowercase()) {
             "video" -> {
                 VideoContent(
+                    player = player,
                     videoFile = file,
                     playbackId = playbackId,
                     onFinished = handleFinished,
@@ -719,6 +746,7 @@ private fun SspCachedAdView(
  */
 @Composable
 private fun SspFallbackView(
+    player: ExoPlayer,
     playbackId: Int,
     fallbackFile: File,
     durationMs: Long,
@@ -730,6 +758,7 @@ private fun SspFallbackView(
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (isVideo) {
             VideoContent(
+                player = player,
                 videoFile = fallbackFile,
                 playbackId = playbackId,
                 onFinished = onCompleted,
